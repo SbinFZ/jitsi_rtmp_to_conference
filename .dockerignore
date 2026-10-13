@@ -1,0 +1,8 @@
+.git
+.artifacts
+bin
+recordings
+.env
+.env.*
+*.log
+.DS_Store

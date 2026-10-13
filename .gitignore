@@ -1,0 +1,9 @@
+/bin/
+/dist/
+/.artifacts/
+/recordings/
+.env
+.env.*
+!.env.example
+*.log
+.DS_Store
