@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
@@ -38,14 +39,74 @@ func Redact(s string) string {
 	return userInfo.ReplaceAllString(secretQuery.ReplaceAllString(s, `${1}[REDACTED]`), `${1}[REDACTED]@`)
 }
 
+// Options describes one external media input.
+type Options struct {
+	Input string // URL, local file, "-" (stdin) or "test"
+	Key   string // optional NodeMedia PLAY signing key (HTTP-FLV / RTMP pull)
+	Proxy string // optional HTTP-FLV-only proxy
+	// Listen: the input URL is a local RTMP ingest (see internal/rtmpserver);
+	// Next blocks until an authorized encoder publishes, returning its FLV.
+	Listen bool
+	Next   func(context.Context) (io.ReadCloser, error)
+}
+
+// IsFile reports whether input names an existing local file (any OS path syntax).
+func IsFile(source string) (string, bool) {
+	if strings.HasPrefix(strings.ToLower(source), "file://") {
+		u, err := url.Parse(source)
+		if err != nil {
+			return "", false
+		}
+		source = u.Path
+		// file:///C:/video.flv on Windows
+		if len(source) > 2 && source[0] == '/' && source[2] == ':' {
+			source = source[1:]
+		}
+		source = filepath.FromSlash(source)
+	}
+	fi, err := os.Stat(source)
+	return source, err == nil && fi.Mode().IsRegular()
+}
+
+// Restartable reports whether the input can be reopened after it ends/fails.
+func (o Options) Restartable() bool { return o.Input != "-" }
+
+// Live reports a network source whose normal end means "reconnect", unlike a
+// file/stdin/test source whose end means "finished".
+func (o Options) Live() bool {
+	if o.Listen {
+		return true
+	}
+	if o.Input == "-" || o.Input == "test" {
+		return false
+	}
+	_, file := IsFile(o.Input)
+	return !file
+}
+
 // Source returns FFmpeg input arguments and an optional streaming stdin.
 // HTTP FLV is fetched by Go to avoid platform-dependent FFmpeg TLS stacks.
-func Source(ctx context.Context, source, key, proxy string) ([]string, io.ReadCloser, error) {
+func Source(ctx context.Context, opt Options) ([]string, io.ReadCloser, error) {
+	source, key, proxy := opt.Input, opt.Key, opt.Proxy
+	if opt.Listen {
+		if opt.Next == nil {
+			return nil, nil, fmt.Errorf("RTMP ingest server is not running")
+		}
+		body, err := opt.Next(ctx)
+		if err != nil {
+			return nil, nil, err
+		}
+		return []string{"-f", "flv", "-i", "pipe:0"}, body, nil
+	}
 	if source == "test" {
 		return []string{"-re", "-f", "lavfi", "-i", "testsrc2=size=640x360:rate=25", "-re", "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000"}, nil, nil
 	}
 	if source == "-" {
 		return []string{"-i", "pipe:0"}, os.Stdin, nil
+	}
+	// Check local files before URL parsing: "C:\\x.flv" parses as scheme "c".
+	if path, ok := IsFile(source); ok {
+		return []string{"-re", "-i", path}, nil, nil
 	}
 	u, err := url.Parse(source)
 	if err != nil {
@@ -66,21 +127,23 @@ func Source(ctx context.Context, source, key, proxy string) ([]string, io.ReadCl
 		return []string{"-f", "flv", "-i", "pipe:0"}, body, nil
 	}
 	switch u.Scheme {
-	case "http", "https", "rtmp", "rtmps", "rtsp", "srt", "udp":
+	case "http", "https", "rtmp", "rtmps", "rtmpt", "rtmpts", "rtsp", "rtsps", "srt", "udp":
+		if u.Host == "" {
+			return nil, nil, fmt.Errorf("input URL needs a host")
+		}
+		// rw_timeout (microseconds) makes a stalled live source fail instead of
+		// freezing the participant forever; the restart loop then reconnects.
 		args := []string{"-rw_timeout", "15000000"}
-		if u.Scheme == "rtsp" {
+		if strings.HasPrefix(u.Scheme, "rtsp") {
 			args = append(args, "-rtsp_transport", "tcp")
+		}
+		if strings.HasPrefix(u.Scheme, "rtmp") {
+			// Live RTMP: play the live stream (not a recorded/VOD lookup).
+			args = append(args, "-rtmp_live", "live")
 		}
 		return append(args, "-i", source), nil, nil
 	case "", "file":
-		path := source
-		if u.Scheme == "file" {
-			path = u.Path
-		}
-		if _, err := os.Stat(path); err != nil {
-			return nil, nil, fmt.Errorf("input file unavailable")
-		}
-		return []string{"-re", "-i", path}, nil, nil
+		return nil, nil, fmt.Errorf("input file unavailable")
 	default:
 		return nil, nil, fmt.Errorf("unsupported input protocol %q", u.Scheme)
 	}

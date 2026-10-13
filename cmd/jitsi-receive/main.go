@@ -25,6 +25,9 @@ import (
 	"jitsi-stream/internal/media"
 )
 
+// version is set at build time: -ldflags "-X main.version=v1.2.3".
+var version = "dev"
+
 type recorder interface {
 	WriteRTP(*rtp.Packet) error
 	Close() error
@@ -44,7 +47,12 @@ func run() error {
 	flag.DurationVar(&cc.JoinTimeout, "join-timeout", 5*time.Minute, "wait for Jingle")
 	flag.DurationVar(&cc.ConnectTimeout, "connect-timeout", 30*time.Second, "ICE/DTLS timeout")
 	flag.BoolVar(&cc.Debug, "debug-xmpp", false, "sensitive raw signalling logs")
+	showVersion := flag.Bool("version", false, "print version and exit")
 	flag.Parse()
+	if *showVersion {
+		fmt.Println("jitsi-receive", version)
+		return nil
+	}
 	if cc.Room == "" || duration <= 0 || cc.JoinTimeout <= 0 || cc.ConnectTimeout <= 0 {
 		return fmt.Errorf("--room and positive duration/timeouts required")
 	}

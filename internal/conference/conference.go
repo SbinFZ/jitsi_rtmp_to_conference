@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/url"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -27,6 +28,7 @@ type Connection struct {
 	PC           *webrtc.PeerConnection
 	Audio, Video *webrtc.TrackLocalStaticRTP
 	Done         chan error
+	name         string
 	closeOnce    sync.Once
 }
 
@@ -77,7 +79,7 @@ func Join(ctx context.Context, cfg Config) (_ *Connection, err error) {
 			case <-ctx.Done():
 				return
 			case stanza := <-sess.Conn.Stanzas():
-				if strings.Contains(stanza, "session-terminate") || strings.Contains(stanza, "<stream:error") {
+				if isTermination(stanza, sess.RoomJID+"/focus") {
 					c.fail(fmt.Errorf("Jitsi session terminated; reconnect required"))
 				}
 			}
@@ -166,11 +168,27 @@ func Join(ctx context.Context, cfg Config) (_ *Connection, err error) {
 	if err != nil {
 		return nil, fmt.Errorf("bridge channel: %w", err)
 	}
-	if err = sess.Conn.SetMediaPresence(cfg.Name, cfg.PublishAudio, cfg.PublishVideo); err != nil {
-		return nil, err
-	}
+	c.name = cfg.Name
 	slog.Info("Jitsi transport ready", "endpoint", nick)
 	return c, nil
+}
+
+// SetMedia publishes which local tracks are live. Joined tracks start muted so
+// participants see an avatar, not a frozen/black tile, until media flows.
+func (c *Connection) SetMedia(audio, video bool) error {
+	return c.Session.Conn.SetMediaPresence(c.name, audio, video)
+}
+
+var terminateAction = regexp.MustCompile(`<jingle\b[^>]*\baction=['"]session-terminate['"]`)
+
+// isTermination matches only a Jingle session-terminate IQ from the focus,
+// never chat text or other participants' stanzas that merely contain the word.
+func isTermination(stanza, focus string) bool {
+	if !strings.HasPrefix(stanza, "<iq") || !terminateAction.MatchString(stanza) {
+		return false
+	}
+	from := regexp.MustCompile(`\bfrom=['"]([^'"]+)['"]`).FindStringSubmatch(stanza)
+	return len(from) == 2 && from[1] == focus
 }
 
 func drainRTCP(s *webrtc.RTPSender) {

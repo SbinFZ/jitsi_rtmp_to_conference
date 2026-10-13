@@ -31,7 +31,7 @@ func TestFLVBodyPreserved(t *testing.T) {
 		_, _ = io.WriteString(w, want)
 	}))
 	defer s.Close()
-	args, body, err := Source(context.Background(), s.URL+"/app/live.flv?sign=one-use", "", "")
+	args, body, err := Source(context.Background(), Options{Input: s.URL + "/app/live.flv?sign=one-use", Key: "", Proxy: ""})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -49,7 +49,7 @@ func TestExplicitProxy(t *testing.T) {
 		_, _ = io.WriteString(w, "FLV\x01\x05\x00\x00\x00\x09")
 	}))
 	defer proxy.Close()
-	_, body, err := Source(context.Background(), "http://unreachable.invalid/live.flv", "", proxy.URL)
+	_, body, err := Source(context.Background(), Options{Input: "http://unreachable.invalid/live.flv", Key: "", Proxy: proxy.URL})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -59,7 +59,7 @@ func TestExplicitProxy(t *testing.T) {
 func TestTLSVerificationNotDisabled(t *testing.T) {
 	s := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
 	defer s.Close()
-	_, _, err := Source(context.Background(), s.URL+"/live.flv", "", "")
+	_, _, err := Source(context.Background(), Options{Input: s.URL + "/live.flv", Key: "", Proxy: ""})
 	if err == nil {
 		t.Fatal("accepted untrusted TLS certificate")
 	}
@@ -74,7 +74,7 @@ func TestHTTPErrors(t *testing.T) {
 			w.WriteHeader(tc.status)
 			_, _ = io.WriteString(w, tc.body)
 		}))
-		_, body, err := Source(context.Background(), s.URL+"/live.flv", "", "")
+		_, body, err := Source(context.Background(), Options{Input: s.URL + "/live.flv", Key: "", Proxy: ""})
 		s.Close()
 		if err == nil {
 			body.Close()
@@ -89,16 +89,16 @@ func TestInputAdapters(t *testing.T) {
 	}
 	f.Close()
 	for _, source := range []string{"test", f.Name(), "rtmp://example.test/app/live", "rtsp://example.test/stream", "https://example.test/live.m3u8"} {
-		args, body, err := Source(context.Background(), source, "", "")
+		args, body, err := Source(context.Background(), Options{Input: source, Key: "", Proxy: ""})
 		if err != nil || len(args) == 0 || body != nil {
 			t.Fatalf("%s %v %v", source, args, err)
 		}
 	}
-	_, _, err = Source(context.Background(), f.Name(), "test-key", "")
+	_, _, err = Source(context.Background(), Options{Input: f.Name(), Key: "test-key", Proxy: ""})
 	if err != nil {
 		t.Fatal("signing key must not break local files", err)
 	}
-	if _, _, err = Source(context.Background(), "gopher://example.test/live", "", ""); err == nil {
+	if _, _, err = Source(context.Background(), Options{Input: "gopher://example.test/live", Key: "", Proxy: ""}); err == nil {
 		t.Fatal("unsupported protocol")
 	}
 }

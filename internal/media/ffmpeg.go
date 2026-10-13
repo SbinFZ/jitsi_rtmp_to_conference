@@ -11,27 +11,24 @@ import (
 	"os/exec"
 	"strconv"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/pion/rtp"
-	"github.com/pion/webrtc/v4"
 	"jitsi-stream/internal/input"
 )
 
 type Config struct {
-	Input, Key, FFmpeg, Proxy string
-	Height, FPS, VideoKbps    int
-	NoAudio                   bool
+	Input                  input.Options
+	FFmpeg                 string
+	Height, FPS, VideoKbps int
+	NoAudio                bool
 }
-
-type Counters struct{ Audio, Video atomic.Uint64 }
 
 func outputArgs(cfg Config, videoPort, audioPort int) []string {
 	args := []string{"-map", "0:v:0", "-an", "-vf", fmt.Sprintf("scale=-2:%d,fps=%d", cfg.Height, cfg.FPS), "-c:v", "libvpx", "-deadline", "realtime", "-cpu-used", "6", "-threads", "2", "-b:v", fmt.Sprintf("%dk", cfg.VideoKbps), "-g", strconv.Itoa(cfg.FPS), "-pix_fmt", "yuv420p", "-f", "rtp", "-payload_type", "96", fmt.Sprintf("rtp://127.0.0.1:%d?pkt_size=1200", videoPort)}
 	if !cfg.NoAudio {
 		audioMap := "0:a:0"
-		if cfg.Input == "test" {
+		if cfg.Input.Input == "test" && !cfg.Input.Listen {
 			audioMap = "1:a:0"
 		}
 		args = append(args, "-map", audioMap, "-vn", "-af", "aresample=async=1:first_pts=0", "-c:a", "libopus", "-ar", "48000", "-ac", "2", "-b:a", "96k", "-frame_duration", "20", "-f", "rtp", "-payload_type", "111", fmt.Sprintf("rtp://127.0.0.1:%d?pkt_size=1200", audioPort))
@@ -48,8 +45,10 @@ func listen() (*net.UDPConn, error) {
 }
 
 // Run owns exactly one FFmpeg process and both loopback RTP sockets. It returns
-// only after process + forwarding goroutines have stopped.
-func Run(ctx context.Context, cfg Config, video, audio *webrtc.TrackLocalStaticRTP, stats *Counters) error {
+// only after process + forwarding goroutines have stopped. A nil error means the
+// input ended normally after delivering the required media.
+func Run(ctx context.Context, cfg Config, video, audio *Sink) error {
+	startVideo, startAudio := video.Count(), audio.Count()
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	v, err := listen()
@@ -62,7 +61,7 @@ func Run(ctx context.Context, cfg Config, video, audio *webrtc.TrackLocalStaticR
 		return err
 	}
 	defer a.Close()
-	args, body, err := input.Source(ctx, cfg.Input, cfg.Key, cfg.Proxy)
+	args, body, err := input.Source(ctx, cfg.Input)
 	if err != nil {
 		return err
 	}
@@ -102,10 +101,10 @@ func Run(ctx context.Context, cfg Config, video, audio *webrtc.TrackLocalStaticR
 	var wg sync.WaitGroup
 	errors := make(chan error, 2)
 	wg.Add(1)
-	go func() { defer wg.Done(); forward(ctx, v, video, &stats.Video, errors) }()
+	go func() { defer wg.Done(); forward(ctx, v, video, errors) }()
 	if audio != nil {
 		wg.Add(1)
-		go func() { defer wg.Done(); forward(ctx, a, audio, &stats.Audio, errors) }()
+		go func() { defer wg.Done(); forward(ctx, a, audio, errors) }()
 	}
 	logDone := make(chan struct{})
 	go func() {
@@ -138,7 +137,7 @@ loop:
 			wait = nil
 			break loop
 		case <-ticker.C:
-			slog.Info("media sent", "video_packets", stats.Video.Load(), "audio_packets", stats.Audio.Load())
+			slog.Info("media sent", "video_packets", video.Count(), "audio_packets", audio.Count())
 		}
 	}
 	cancel()
@@ -158,33 +157,35 @@ loop:
 	if result != nil {
 		return fmt.Errorf("media pipeline: %s", input.Redact(result.Error()))
 	}
-	if stats.Video.Load() == 0 || (!cfg.NoAudio && stats.Audio.Load() == 0) {
+	if video.Count() == startVideo || (audio != nil && audio.Count() == startAudio) {
 		return fmt.Errorf("FFmpeg exited without sending required audio/video packets")
 	}
 	return nil
 }
 
-func forward(ctx context.Context, conn *net.UDPConn, track *webrtc.TrackLocalStaticRTP, count *atomic.Uint64, errs chan<- error) {
-	if track == nil {
+func forward(ctx context.Context, conn *net.UDPConn, sink *Sink, errs chan<- error) {
+	if sink == nil {
 		return
 	}
 	buf := make([]byte, 65535)
 	for {
-		n, _, err := conn.ReadFromUDP(buf)
+		n, from, err := conn.ReadFromUDP(buf)
 		if err != nil {
 			return
+		}
+		if !from.IP.IsLoopback() {
+			continue
 		}
 		packet := new(rtp.Packet)
 		if err := packet.Unmarshal(buf[:n]); err != nil {
 			continue
 		}
-		if err := track.WriteRTP(packet); err != nil {
+		if err := sink.Write(packet); err != nil {
 			select {
 			case errs <- err:
 			case <-ctx.Done():
 			}
 			return
 		}
-		count.Add(1)
 	}
 }

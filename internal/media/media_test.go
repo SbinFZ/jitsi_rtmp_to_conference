@@ -4,6 +4,7 @@ import (
 	"context"
 	"github.com/pion/rtp"
 	"github.com/pion/webrtc/v4"
+	"jitsi-stream/internal/input"
 	"os/exec"
 	"strings"
 	"testing"
@@ -32,7 +33,7 @@ func TestReorderSkipsLost(t *testing.T) {
 	}
 }
 func TestOutputArgs(t *testing.T) {
-	cfg := Config{Input: "test", Height: 720, FPS: 25, VideoKbps: 1500}
+	cfg := Config{Input: input.Options{Input: "test"}, Height: 720, FPS: 25, VideoKbps: 1500}
 	s := strings.Join(outputArgs(cfg, 1234, 2345), " ")
 	if !strings.Contains(s, "1:a:0") || !strings.Contains(s, "libopus") || !strings.Contains(s, "pkt_size=1200") {
 		t.Fatal(s)
@@ -51,10 +52,10 @@ func TestPipelineCancellation(t *testing.T) {
 	defer cancel()
 	video, _ := webrtc.NewTrackLocalStaticRTP(webrtc.RTPCodecCapability{MimeType: webrtc.MimeTypeVP8}, "v", "s")
 	audio, _ := webrtc.NewTrackLocalStaticRTP(webrtc.RTPCodecCapability{MimeType: webrtc.MimeTypeOpus, ClockRate: 48000, Channels: 2}, "a", "s")
-	stats := new(Counters)
+	vs, as := NewSink(video, 90000), NewSink(audio, 48000)
 	start := time.Now()
-	err = Run(ctx, Config{Input: "test", FFmpeg: ff, Height: 360, FPS: 25, VideoKbps: 300}, video, audio, stats)
-	if err == nil || time.Since(start) > 8*time.Second || stats.Video.Load() == 0 || stats.Audio.Load() == 0 {
-		t.Fatalf("err=%v stats=%d/%d runtime=%v", err, stats.Video.Load(), stats.Audio.Load(), time.Since(start))
+	err = Run(ctx, Config{Input: input.Options{Input: "test"}, FFmpeg: ff, Height: 360, FPS: 25, VideoKbps: 300}, vs, as)
+	if err == nil || time.Since(start) > 8*time.Second || vs.Count() == 0 || as.Count() == 0 {
+		t.Fatalf("err=%v stats=%d/%d runtime=%v", err, vs.Count(), as.Count(), time.Since(start))
 	}
 }
