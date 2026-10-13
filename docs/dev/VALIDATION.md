@@ -1,6 +1,6 @@
 # 实际验证记录
 
-验证日期：2026-10-13。本机为 macOS arm64；Linux 为 cmin2 x86_64。
+验证日期：2026-10-13。本机为 macOS arm64；Linux 为 test-server x86_64。
 目标 Jitsi：`m.yuanjinapp.com`，Docker stable-10314。
 
 ## 已通过的链路
@@ -11,12 +11,12 @@
 |---|---|---|
 | 本机合成测试源 → 实际 Jitsi → 本机 CLI | 4,723 视频包 / 1,353 音频包 | VP8 / Opus；早期诊断文件曾有乱序/重复包时间戳告警，随后修复诊断接收器 |
 | 本机真实 NodeMedia HTTPS-FLV → Jitsi → 本机 CLI | 5,929 视频包 / 1,971 音频包 | 1280×720 VP8：981 帧；Opus 48 kHz 双声道：1,967 帧；`ffmpeg -v error ... -f null -` 无报错 |
-| cmin2 Docker 拉真实 HTTPS-FLV（临时 SSH 代理）→ Jitsi → 本机 CLI | 6,240 视频包 / 1,666 音频包 | 1280×720 VP8：832 帧；Opus 48 kHz 双声道：1,662 帧；独立解码无报错 |
-| cmin2 Docker 读取 12 秒真实 FLV 样本 → Jitsi → 本机 CLI | 2,012 视频包 / 602 音频包 | 1280×720 VP8：300 帧；Opus 48 kHz 双声道：598 帧；独立解码无报错；容器退出码 0 |
+| test-server Docker 拉真实 HTTPS-FLV（临时 SSH 代理）→ Jitsi → 本机 CLI | 6,240 视频包 / 1,666 音频包 | 1280×720 VP8：832 帧；Opus 48 kHz 双声道：1,662 帧；独立解码无报错 |
+| test-server Docker 读取 12 秒真实 FLV 样本 → Jitsi → 本机 CLI | 2,012 视频包 / 602 音频包 | 1280×720 VP8：300 帧；Opus 48 kHz 双声道：598 帧；独立解码无报错；容器退出码 0 |
 
 计数含义：包数是诊断接收器经过有限乱序缓冲与重复包抑制后交给文件 writer 的 RTP 包数；帧数来自 `ffprobe -count_frames`。不能用包数直接推断画质、时延或唇音同步。Linux 临时代理实流的媒体时长短于墙钟时长，存在输入代理/网络抖动，未承诺实时延迟上限。
 
-最新源码又通过 `scripts/verify.sh` 全流程复验：测试源经实际 Jitsi 后，视频解码 998 帧、音频解码 1,993 帧，无解码报错。P2P 隔离修复后再次复验：本机测试源全流程视频 1,009 帧 / 音频 2,019 帧；cmin2 最终镜像读取真实 FLV 样本，发送并接收 2,013 视频包 / 602 音频包，解码 300 帧 VP8 1280×720 / 598 帧 Opus，收发两端退出码均为 0。最终默认 Dockerfile 源码构建镜像 ID：`sha256:6381d398822bb9530c14f240847692a9ecbe6f36367c07dfc8ce1dad3f4f389c`。
+最新源码又通过 `scripts/verify.sh` 全流程复验：测试源经实际 Jitsi 后，视频解码 998 帧、音频解码 1,993 帧，无解码报错。P2P 隔离修复后再次复验：本机测试源全流程视频 1,009 帧 / 音频 2,019 帧；test-server 最终镜像读取真实 FLV 样本，发送并接收 2,013 视频包 / 602 音频包，解码 300 帧 VP8 1280×720 / 598 帧 Opus，收发两端退出码均为 0。最终默认 Dockerfile 源码构建镜像 ID：`sha256:6381d398822bb9530c14f240847692a9ecbe6f36367c07dfc8ce1dad3f4f389c`。
 
 P2P 兼容：站点 `config.p2p.enabled=true`。转换器 presence 标记 `botType=poltergeist`（lib-jitsi-meet 据此不对其发起 P2P），并拒绝非 focus 来源的 Jingle，防止覆盖 JVB 会话；有单元测试。浏览器两人会议场景仍需人工确认。
 
@@ -28,7 +28,7 @@ P2P 兼容：站点 `config.p2p.enabled=true`。转换器 presence 标记 `botTy
 
 - 浏览器/Python 读取本机系统代理 `127.0.0.1:7897`；curl、FFmpeg、Go 默认没有自动使用它。这是之前“Python 成功、命令行直连失败”差异的重要原因。
 - Go 标准 HTTP/TLS 经显式 `--input-proxy` 已成功拉取真实 FLV，未关闭证书/主机名校验。TLS fingerprint 实验已删除，不保留 uTLS 依赖。
-- cmin2 直连源站仍不可靠；**没有验证为直连成功**。
+- test-server 直连源站仍不可靠；**没有验证为直连成功**。
 - Linux 实流验证临时使用 SSH `-R 127.0.0.1:17897:127.0.0.1:7897`，只监听远端回环，不开放公网代理。正式运行应使用能访问源站的 Linux 或稳定代理，而非依赖开发机。
 - 同时用本地真实 FLV 样本独立验证 Linux 媒体与 Jitsi 协议转换，不将源站网络失败归咎于转换协议。
 
@@ -38,7 +38,7 @@ P2P 兼容：站点 `config.p2p.enabled=true`。转换器 presence 标记 `botTy
 
 - `make test`：主项目与信令 fork 的 `go test -race ./...`；主项目 `go vet ./...`。
 - `make build`；`make linux`：Linux amd64 CLI 为静态链接 ELF。
-- cmin2 上按默认 Dockerfile **完整源码构建**（非仅复制 Mac 二进制），非 root、host network、只读文件系统、drop ALL capabilities 运行。
+- test-server 上按默认 Dockerfile **完整源码构建**（非仅复制 Mac 二进制），非 root、host network、只读文件系统、drop ALL capabilities 运行。
 - 信令 fork 的 IQ rejection、XML 字符/UTF-8 nickname、Jingle direction/source name 回归测试。
 - NodeMedia 测试密钥签名向量、保留原始签名 URL、代理传输、401、非 FLV 响应、不信任 TLS 证书拒绝测试。
 - RTP 乱序、序号回绕、重复包、丢包窗口测试；FFmpeg 测试源流水线取消时及时结束并确实产生两路 RTP。
@@ -57,10 +57,10 @@ P2P 兼容：站点 `config.p2p.enabled=true`。转换器 presence 标记 `botTy
 | 场景 | 接收端 | 解码结果 |
 |---|---|---|
 | 本机 RTMP 拉流（本地 RTMP 服务器循环播放真实 FLV 样本）→ Jitsi | 5,370 视频包 / 1,524 音频包 | VP8 1280×720 754 帧；Opus 1,520 帧；无报错 |
-| 本机 RTMP 拉取真实 NodeMedia（`rtmp://…:1935`，自动签名） | 184 视频包 / 52 音频包 | 握手、签名、元数据正确；随后到 1935 端口的吞吐几乎为零，断流后自动重连且与会者未离会。cmin2 同样 30 秒内无媒体：**网络路径问题，非协议问题**；真实源 RTMP 长时稳定性未验证 |
+| 本机 RTMP 拉取真实 NodeMedia（`rtmp://…:1935`，自动签名） | 184 视频包 / 52 音频包 | 握手、签名、元数据正确；随后到 1935 端口的吞吐几乎为零，断流后自动重连且与会者未离会。test-server 同样 30 秒内无媒体：**网络路径问题，非协议问题**；真实源 RTMP 长时稳定性未验证 |
 | 本机 RTMP 推流接收：两个推流端先后推流 | 3,828 视频包 / 1,153 音频包，单一音视频轨 | VP8 573 帧 / Opus 1,149 帧；同一与会者全程在会，RTP 连续 |
 | 本机推流端早于会议就绪 15 秒开始推流 | 2,711 视频包 / 680 音频包 | 382 帧 ≈ 就绪后的剩余直播时长；推流端 36 秒流用时 35 秒（未被反压卡住），无积压突发 |
-| cmin2 Docker（legacy builder 源码构建）推流接收 | 2,005 视频包 / 602 音频包 | 300 帧 / 598 帧（12 秒样本全部送达）；容器退出码 0 |
+| test-server Docker（legacy builder 源码构建）推流接收 | 2,005 视频包 / 602 音频包 | 300 帧 / 598 帧（12 秒样本全部送达）；容器退出码 0 |
 
 安全：首版曾用 FFmpeg `-listen 1` 做 RTMP 服务器，测试发现**错误密钥只告警、媒体仍进入会议**。已改为内置 RTMP 服务器（`internal/rtmpserver`）：握手阶段校验 app 与密钥（常量时间比较），错误密钥/错误 app/并发第二推流端均被拒绝（集成测试 + 两平台端到端确认，不进入会议）；未认证连接 15 秒握手超时、推流 30 秒无数据断开；显式限制 chunk/消息大小与数量。
 

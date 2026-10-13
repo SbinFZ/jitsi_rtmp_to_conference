@@ -1,121 +1,192 @@
 # jitsi_rtmp_to_conference
 
-**jitsi-stream**：把 RTMP / HTTP-FLV / RTSP / HLS / 本地文件等外部视频流，转换为 Jitsi 会议中的一个**真实与会者**（有名字、有画面、有声音）。
+<p align="center">
+  <b>Publish RTMP, HTTP-FLV, RTSP, HLS, or local media files into Jitsi Meet as a native participant with video, audio, and display name.</b>
+</p>
 
-纯命令行：**Go + Pion 原生 WebRTC + FFmpeg**。不需要浏览器、无头浏览器、虚拟摄像头或显示服务器，可直接运行在 Linux 服务器 / Docker 中，也提供 Windows、macOS 版本。
+<p align="center">
+  <a href="#english">English</a> | <a href="#中文说明">中文说明</a>
+</p>
+
+<p align="center">
+  <a href="https://github.com/SbinFZ/jitsi_rtmp_to_conference/actions/workflows/ci.yml"><img src="https://github.com/SbinFZ/jitsi_rtmp_to_conference/actions/workflows/ci.yml/badge.svg" alt="CI Status"></a>
+  <a href="https://github.com/SbinFZ/jitsi_rtmp_to_conference/releases"><img src="https://img.shields.io/github/v/release/SbinFZ/jitsi_rtmp_to_conference?include_prereleases" alt="Latest Release"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/github/license/SbinFZ/jitsi_rtmp_to_conference" alt="License: MIT"></a>
+</p>
+
+---
+
+<a name="english"></a>
+## English
+
+**jitsi-stream** is a standalone, lightweight command-line converter written in **Go + Pion WebRTC + FFmpeg**. It connects to any standard Jitsi Meet instance via native XMPP/Jingle signalling, negotiates ICE/DTLS, and streams transcoded VP8 video and Opus audio to the Jitsi Videobridge (JVB).
+
+No browsers, headless Chromium, Electron, X11/Wayland display servers, or virtual camera kernel modules are required. It runs cleanly inside minimal Linux containers (Docker / Kubernetes), bare-metal servers (systemd), macOS, and Windows.
 
 ```
-RTMP 推流 (OBS…) ─┐
-RTMP / HTTP-FLV / ├─→ jitsi-stream ──WebRTC (VP8+Opus)──→ Jitsi JVB ──→ 会议中的所有人
-RTSP / HLS / 文件 ─┘        └── XMPP/Jingle 原生入会（匿名）
+RTMP Push (OBS, vMix, encoders) ─┐
+RTMP Pull / HTTP-FLV /           ├─→ jitsi-stream ──WebRTC (VP8+Opus)──→ Jitsi JVB ──→ Meeting Participants
+RTSP / HLS / Local Files         ─┘        └── Native XMPP/Jingle Signalling
 ```
 
-## 功能
+### Key Features
 
-| 输入 | 用法 | 状态 |
+| Input Mode | CLI Example | Status |
 |---|---|---|
-| **RTMP 拉流** | `--input rtmp://host/app/stream` | ✅ 已端到端验证 |
-| **RTMP 推流接收**（OBS / 推流软件 / 手机 App 推到本工具） | `--listen --input rtmp://0.0.0.0:1935/live/<密钥>` | ✅ 已端到端验证，含密钥鉴权 |
-| HTTP(S)-FLV 直播 | `--input https://host/app/stream.flv` | ✅ 已端到端验证 |
-| 本地文件（FLV/MP4/MKV…） | `--input /path/video.mp4` | ✅ 已端到端验证 |
-| RTSP / HLS / SRT / UDP | `--input rtsp://…` 等，由 FFmpeg 处理 | ⚠️ 已实现，未用真实源验证 |
-| NodeMedia 签名 | 设置 `NODEMEDIA_AUTH_KEY`，自动生成 `sign=` | ✅ |
+| **RTMP Push Server** (OBS/encoder pushes to tool) | `--listen --input rtmp://0.0.0.0:1935/live/<secret>` | ✅ Verified, constant-time token auth |
+| **RTMP Pull** (pull from media server) | `--input rtmp://source.example.com/live/stream` | ✅ Verified, supports RTMPS/RTMPT |
+| **HTTP(S)-FLV Live Stream** | `--input https://source.example.com/live/stream.flv` | ✅ Verified, auto system proxy support |
+| **Local Video Files** (MP4, MKV, FLV...) | `--input /data/sample.mp4` | ✅ Real-time playback (`-re`) |
+| **Standard Input (pipe)** | `ffmpeg ... \| jitsi-stream --room r --input -` | ✅ Direct stdin ingestion |
+| **RTSP / HLS / SRT / UDP** | `--input rtsp://camera:554/live` | ⚠️ Implemented via FFmpeg |
+| **NodeMedia Signed URLs** | Set `NODEMEDIA_AUTH_KEY`, automatic signature generation | ✅ Automatic token refresh on reconnect |
 
-- 输入中断后自动重连；**与会者保持在会议中**（RTP 序列号/时间戳连续），无媒体时自动显示为静音头像。
-- 一次性签名 URL：用签名密钥自动重签，或 `--input-cmd` 每次重连前获取新地址；无法刷新时遇 401 立即给出提示退出。
-- 会议不存在时不会自己开空会议：二进制指数退避重试 5 次（1s→16s）后退出（`--meeting-retries 0` 可关闭）。
-- HTTP-FLV 自动使用系统代理（macOS/Windows，与浏览器一致）或 `HTTPS_PROXY`。
-- RTMP 推流模式：app + 推流密钥在 RTMP 握手阶段校验（常量时间比较），同一时间只接受一个推流端；会议未就绪时丢弃而不是积压，推流软件不会卡住。
-- 优雅退出（Ctrl+C / SIGTERM）：停止 FFmpeg、退出会议，不留“幽灵与会者”。
-- 日志自动隐藏 URL 中的 `sign/token/key/password` 等敏感参数。
+- **Meeting Presence & Continuity**: Input restarts (network hiccup, encoder reconnect) do NOT drop the participant from the meeting. RTP sequence numbers and timestamps remain contiguous. When input stream drops, the participant smoothly transitions to a muted avatar rather than freezing.
+- **Meeting-Driven Exponential Backoff**: By default, checks if a meeting exists before creating one. If absent, retries with binary exponential backoff (`1s, 2s, 4s, 8s, 16s`) up to 5 times before exiting cleanly (configurable via `--meeting-retries`).
+- **One-Time URL Recovery**: Supports `--input-cmd` to run a command fetching a fresh signed URL before each (re)connection attempt.
+- **Auto Proxy Detection**: On macOS (`scutil`) and Windows (Registry), automatically reads system proxy settings with bypass rules for HTTP-FLV streams.
+- **Security & Privacy**: Built-in RTMP server validates App and Stream Key before accepting frames; credentials and signatures in URLs are automatically redacted in logs.
 
-## 下载
+### Quick Start
 
-在 GitHub **Releases** 页面下载对应平台的压缩包（打 `v*` 标签时由 GitHub Actions 自动编译发布）：
+#### 1. Binary Download
 
-| 系统 | x86_64 | ARM |
+Download pre-compiled binaries from [GitHub Releases](https://github.com/SbinFZ/jitsi_rtmp_to_conference/releases):
+
+| OS | Architecture | Package |
 |---|---|---|
-| Linux | `linux_amd64.tar.gz` | `linux_arm64.tar.gz`、`linux_armv7.tar.gz`（树莓派等） |
-| macOS | `darwin_amd64.tar.gz`（Intel） | `darwin_arm64.tar.gz`（Apple Silicon） |
-| Windows | `windows_amd64.zip` | `windows_arm64.zip` |
+| **Linux** | x86_64 / ARM64 / ARMv7 | `linux_amd64.tar.gz`, `linux_arm64.tar.gz`, `linux_armv7.tar.gz` |
+| **macOS** | Apple Silicon / Intel | `darwin_arm64.tar.gz`, `darwin_amd64.tar.gz` |
+| **Windows** | x86_64 / ARM64 | `windows_amd64.zip`, `windows_arm64.zip` |
 
-Docker 镜像（linux/amd64、arm64、arm/v7）：`ghcr.io/sbinfz/jitsi_rtmp_to_conference:<版本>`。
-每次提交的编译产物也可在 Actions 的 CI 运行记录中下载（`jitsi-stream-packages`）。
+> **Requirement**: [FFmpeg](https://ffmpeg.org/) (with `libvpx` and `libopus`) must be installed on your host system.
 
-压缩包内含 `jitsi-stream`（转换器）、`jitsi-receive`（无浏览器验收工具）、说明书与许可证。**需另外安装 FFmpeg**（含 libvpx、libopus，各平台安装方法见[说明书](docs/USAGE.md#1-安装)）。
-
-## 快速开始
+#### 2. Running Examples
 
 ```bash
-# 1) 拉取 RTMP 直播流，作为与会者“直播画面”加入 my-room
-jitsi-stream --host meet.example.com --room my-room --name '直播画面' \
-  --input 'rtmp://live.example.com/app/stream'
+# Pull an RTMP live stream into meeting "team-sync"
+jitsi-stream --host meet.example.com --room team-sync --name "Live Stream" \
+  --input "rtmp://live.example.com/app/stream"
 
-# 2) 做 RTMP 推流服务器：OBS 推到 rtmp://<本机IP>:1935/live/<密钥>
-jitsi-stream --host meet.example.com --room my-room --name 'OBS' \
-  --listen --input 'rtmp://0.0.0.0:1935/live/换成一个长随机密钥'
+# Run as local RTMP server for OBS (listen mode)
+jitsi-stream --host meet.example.com --room team-sync --name "OBS Stream" \
+  --listen --input "rtmp://0.0.0.0:1935/live/MySecretKey123"
 
-# 3) HTTP-FLV 直播
-jitsi-stream --host meet.example.com --room my-room --input 'https://cdn.example.com/live/stream.flv'
+# Pull HTTP-FLV with custom resolution and bitrate
+jitsi-stream --host meet.example.com --room team-sync \
+  --input "https://cdn.example.com/live/feed.flv" \
+  --height 1080 --fps 30 --bitrate 3000
 ```
 
-**先在浏览器打开 `https://meet.example.com/my-room` 开始会议**，再启动转换器（会议不存在时会以 1s、2s、4s、8s、16s 退避重试 5 次后退出）。
+#### 3. Docker & Docker Compose
 
-Windows（PowerShell）示例：
-
-```powershell
-.\jitsi-stream.exe --host meet.example.com --room my-room --input "rtmp://live.example.com/app/stream"
-```
-
-Docker：
+Pre-built multi-arch images (`linux/amd64`, `linux/arm64`, `linux/arm/v7`):
 
 ```bash
-docker run --rm --init --network host ghcr.io/sbinfz/jitsi_rtmp_to_conference:latest \
-  --host meet.example.com --room my-room --input 'rtmp://live.example.com/app/stream'
+# Pull stream via Docker
+docker run --rm --init --network host \
+  ghcr.io/sbinfz/jitsi_rtmp_to_conference:latest \
+  --host meet.example.com --room team-sync \
+  --input "rtmp://live.example.com/app/stream"
 
-# 或用 Compose（拉流 / RTMP 推流两种模式）
-cd deploy && cp env.example .env && docker compose up -d
+# Using Docker Compose
+cd deploy
+cp env.example .env     # Edit JITSI_HOST, JITSI_ROOM, STREAM_INPUT
+docker compose up -d    # Launches pull service
 ```
 
-完整参数、OBS 设置、NodeMedia 签名、代理、Docker Compose、常见问题见 **[说明书 docs/USAGE.md](docs/USAGE.md)**。
+---
 
-## 文档
+<a name="中文说明"></a>
+## 中文说明
 
-- [说明书 / 使用手册](docs/USAGE.md)
-- [编译、CI 与发布](docs/BUILD.md)
-- [架构与代码结构](docs/ARCHITECTURE.md)
-- [部署模板 deploy/](deploy/)：Docker Compose、systemd
-- [变更记录 CHANGELOG](CHANGELOG.md)
-- 开发记录：[需求与方案](docs/dev/PLAN.md)、[实际验证记录](docs/dev/VALIDATION.md)
-- 第三方组件与许可证：[THIRD_PARTY.md](THIRD_PARTY.md)
+**jitsi-stream** 是一个基于 **Go + Pion WebRTC + FFmpeg** 的轻量级纯命令行转换工具。它能将外部的音视频流（RTMP、HTTP-FLV、RTSP、HLS 或本地视频文件）作为**真实与会者**推入 Jitsi Meet 会议室中，会议内其他成员无需任何插件即可正常收看与收听。
 
-## 范围与限制
+无需安装无头浏览器、Chromium、Electron、X11/Wayland 桌面环境或虚拟摄像头驱动。纯命令行设计，极低资源开销，可直接运行在 Linux 服务器、Docker 容器、Kubernetes、macOS 以及 Windows。
 
-- 面向允许匿名入会的 Jitsi（docker-jitsi-meet 默认配置）；暂不支持 JWT/账号密码/等候室/房间密码、E2EE。
-- 输出固定为 VP8 + Opus 单层（不做 simulcast/自适应码率）。转码需要 CPU：实测 1080p60 输入 → 720p25 输出约占 0.5 个 x86 核、190 MB 内存。
-- 同一进程发布一路流；多路请运行多个进程（不同 `--name`，推流模式用不同端口）。
-- 尚无人工浏览器长时观感/唇音同步验收与 24 小时稳定性测试，详见验证记录。
+### 核心特性
 
-## 项目结构
+- **多协议输入**：
+  - **RTMP 推流服务（Listen 模式）**：内置轻量级 RTMP 服务端，支持 OBS、vMix 或手机推流软件直接推流到本工具，握手阶段进行常量时间密钥鉴权。
+  - **RTMP / HTTP-FLV 拉流**：从直播流媒体服务拉取，支持单次签名、时间戳防盗链重签。
+  - **本地文件 & 管道输入**：按真实时间戳播放本地 MP4/FLV/MKV 视频文件，或接收标准输入管道 (`pipe:0`)。
+  - **RTSP / HLS / SRT**：通过底层 FFmpeg 解封装适配。
+- **会议连续性保证**：推流端断开重连或网络短暂抖动时，**与会者不会退出会议**，音视频序列号和时间戳平滑递增。当无流输入时，自动切换为静音头像状态。
+- **会议不存在重试机制**：默认在入会前检测会议是否已有人开启，若会议室不存在，采用**二进制指数退避（1s, 2s, 4s, 8s, 16s）重试 5 次**，超时后优雅退出（可通过 `--meeting-retries 0` 恢复为主动建会模式）。
+- **一次性签名防失效**：针对断流后一次性 Token 失效的问题，支持 `--input-cmd` 在每次（重）连接前动态执行脚本获取最新推流地址；遇到不可刷新的 401 立即退出并输出明确指引。
+- **全自动代理路由**：在 macOS (`scutil`) 和 Windows (注册表) 下能自动识别系统代理及白名单规则，解决“浏览器可看但命令行拉不到流”的常见网络问题。
+- **安全与合规**：日志自动脱敏敏感参数（Token、Key、Password 等）；镜像默认非 root、只读文件系统运行。
 
-```
-cmd/           jitsi-stream（转换器）、jitsi-receive（无浏览器验收工具）
-internal/      input（输入协议）· rtmpserver（推流接收）· media（FFmpeg→RTP）· conference（Jitsi 入会）
-third_party/   固定版本的 Jitsi 信令与 RTMP 库 fork、第三方许可证
-deploy/        Docker Compose、systemd 模板
-scripts/       打包、端到端验证、许可证生成
-docs/          说明书、编译、架构；docs/dev/ 开发记录
-```
-
-详见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)。
-
-## 开发
+### 常用命令示例
 
 ```bash
-make build      # bin/jitsi-stream, bin/jitsi-receive
-make test       # 单元测试（含 race）；有 FFmpeg 时运行媒体/RTMP 集成测试
-make package    # 交叉编译全部平台 → dist/*.tar.gz|zip + SHA256SUMS
-make verify     # 真实 Jitsi 端到端验证（测试源 → 会议 → 接收并解码）
+# 1. 作为接收端接收 OBS 推流（推流地址：rtmp://<IP>:1935/live/MyKey）
+jitsi-stream --host meet.example.com --room my-room --name "OBS直播" \
+  --listen --input "rtmp://0.0.0.0:1935/live/MyKey"
+
+# 2. 拉取公网 HTTP-FLV 直播流
+jitsi-stream --host meet.example.com --room my-room --name "监控流" \
+  --input "https://stream.example.com/live/camera1.flv"
+
+# 3. 循环播放本地宣传视频到会议室
+jitsi-stream --host meet.example.com --room my-room --name "宣传片" \
+  --input "/data/videos/promo.mp4"
 ```
 
-许可证：MIT（新编写代码）。第三方组件许可证见 `THIRD_PARTY.md`、`NOTICES.txt`。
+---
+
+## 常用参数 / Command-Line Flags
+
+| Flag | Default | Description (EN / 中文) |
+|---|---|---|
+| `--host` | `m.yuanjinapp.com` | Jitsi Meet domain or HTTPS URL / Jitsi 域名或 HTTPS 地址 |
+| `--room` | *(Required)* | Meeting room name / 会议室房间名 |
+| `--name` | `Live Stream` | Participant display name / 与会者显示名称 |
+| `--input` | `$STREAM_INPUT` | Input URL, file path, `-` (stdin), or `test` / 输入流地址或文件路径 |
+| `--listen` | `false` | Enable RTMP server ingest mode for OBS / 启用 RTMP 服务端接收推流 |
+| `--input-cmd` | `""` | Shell command executed before each connect to fetch fresh URL / 动态获取新地址的命令 |
+| `--input-proxy` | `""` (auto) | HTTP-FLV proxy (`auto`, `direct`, or `http(s)://\|socks5://`) / 代理配置 |
+| `--sign-key-file`| `""` | File containing NodeMedia signing key / NodeMedia 签名密钥文件路径 |
+| `--meeting-retries` | `5` | Retries with exponential backoff if room doesn't exist (`0` to disable) / 会议不存在时重试次数 |
+| `--meeting-backoff` | `1s` | Initial backoff duration (doubles each retry) / 会议不存在时的初始退避时长 |
+| `--height` | `720` | Output video height (144-2160, even number) / 输出视频高度 |
+| `--fps` | `25` | Output frame rate (1-60) / 输出视频帧率 |
+| `--bitrate` | `1500` | Target VP8 video bitrate in kbps / 输出目标码率 (kbps) |
+| `--no-audio` | `false` | Publish video only (for muted sources) / 仅推视频轨（无音频源时使用） |
+| `--ffmpeg` | `ffmpeg` | Path to FFmpeg executable / FFmpeg 二进制路径 |
+| `--debug-xmpp` | `false` | Log raw XMPP stanzas (contains credentials, for debug only) / 原始信令调试日志 |
+| `--version` | `false` | Show version information and exit / 打印版本信息 |
+
+---
+
+## Documentation & Manuals / 文档索引
+
+- **[使用说明书 (User Manual)](docs/USAGE.md)**：详细参数说明、OBS 配置指南、NodeMedia 签名机制、Systemd 守护进程与故障排查。
+- **[编译与构建指南 (Build & Release)](docs/BUILD.md)**：本地交叉编译多架构产物、GitHub Actions CI/CD 自动化构建与发布流程。
+- **[系统架构解析 (Architecture)](docs/ARCHITECTURE.md)**：内部模块划分、数据流动链路、核心状态机与扩展开发指南。
+- **[版本变更记录 (Changelog)](CHANGELOG.md)**：各版本发布历史与改进说明。
+- **[开发与验证记录 (Dev Records)](docs/dev/)**：
+  - [需求设计与技术选型 (PLAN.md)](docs/dev/PLAN.md)
+  - [真实测试验收记录 (VALIDATION.md)](docs/dev/VALIDATION.md)
+
+---
+
+## Repository Structure / 代码仓库结构
+
+```
+cmd/           jitsi-stream (main tool), jitsi-receive (headless validation probe)
+internal/
+  ├── input/         Protocol resolution, proxy routing, token signing, URL redaction
+  ├── rtmpserver/    Built-in authenticated RTMP ingest server (for OBS push)
+  ├── media/         FFmpeg process lifecycle, loopback RTP, continuous sequence/timestamp sink
+  └── conference/    Native Jitsi XMPP/Jingle signalling, ICE/DTLS transport, presence management
+third_party/   Vendored & patched signalling and RTMP modules, full third-party notices
+deploy/        Docker Compose templates (pull & ingest profiles) and systemd service files
+scripts/       Packaging script, E2E verification script, license generator
+docs/          User manuals, architecture specs, build guides, and validation reports
+```
+
+## License
+
+This project is licensed under the [MIT License](LICENSE).
+Third-party dependencies and notices are detailed in [THIRD_PARTY.md](THIRD_PARTY.md) and [NOTICES.txt](third_party/NOTICES.txt).

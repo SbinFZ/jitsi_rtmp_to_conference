@@ -13,7 +13,7 @@
 | R5 | 方便接入其他协议 | 输入适配层：HTTP-FLV 用 Go 拉流送 stdin；RTMP / RTSP / HLS / 文件交给 FFmpeg（按协议分别验证，不将未测的标记已验证） |
 | R6 | 封装、迭代、Docker | 分离输入、媒体、Jitsi 信令、CLI；固定依赖；Dockerfile、使用文档和测试 |
 | R7 | 一次性签名地址 | 原样使用 URL；可选 NodeMedia MD5 签名刷新，密钥从环境变量读，不提交实际密钥 |
-| R8 | cmin2 到流源网络不好 | 首次联调本机拉流；Linux 验证可使用本机下载样本。网络与协议分开验收，不声称服务器直拉成功 |
+| R8 | test-server 到流源网络不好 | 首次联调本机拉流；Linux 验证可使用本机下载样本。网络与协议分开验收，不声称服务器直拉成功 |
 | R9 | 可操作、能诊断失败 | 超时、重试、退出清理、stderr 日志、SIGINT/SIGTERM；不默认输出签名 / 密钥 |
 
 范围外：Web UI、转发会议画面到 RTMP、多路混流、任意受限会议/JWT/密码/等候室认证、E2EE、完整自适应码率。首版不自动改动生产 Jitsi 的配置或重启服务。
@@ -21,11 +21,11 @@
 ## 2. 已探测资源
 
 - 当前项目原为空目录；本机有 Go 1.25.3、Rust、Node、FFmpeg（libvpx/libopus/libx264）。
-- SSH cmin2 可用，Docker 可用，无宿主机 Go / FFmpeg。
+- SSH test-server 可用，Docker 可用，无宿主机 Go / FFmpeg。
 - Jitsi Docker stable-10314；Prosody、Jicofo、JVB、web 已运行。
 - config.js: XMPP `meet.jitsi`，MUC `muc.meet.jitsi`；WSS `/xmpp-websocket` 可访问；匿名 SASL 成功。
 - 本机真实 FLV 样本：H.264 Constrained Baseline 1920x1080，AAC-LC 44100Hz 双声道。
-- 初次探测本机 Python 可拉流，但 curl/FFmpeg 直连失败。后续查明：macOS 系统代理为 127.0.0.1:7897，Python/浏览器自动使用，Go/curl 默认未使用；不是已证实的 TLS 实现问题。Go 显式输入代理已验证。cmin2 直连失败，不能作为首轮验证前提；临时 SSH 回环代理可用于 Linux 实流验证。
+- 初次探测本机 Python 可拉流，但 curl/FFmpeg 直连失败。后续查明：macOS 系统代理为 127.0.0.1:7897，Python/浏览器自动使用，Go/curl 默认未使用；不是已证实的 TLS 实现问题。Go 显式输入代理已验证。test-server 直连失败，不能作为首轮验证前提；临时 SSH 回环代理可用于 Linux 实流验证。
 - NodeMedia 提供的签名匹配 `MD5("/app/name-expiry-key")`，刷新后本机返回 FLV；这不等于管理面板密码。无需登录面板或读取浏览器凭据。
 - 可复用 `github.com/zarazaex69/j`，源码已在 /tmp 下载并编译，提交 `6129578a8a498e6ca59e8c66b63b876892279b12`。许可证允许修改/分发。真实部署已完成匿名登录、focus 分配、MUC 入会。一个参与者时未收到 Jingle，需要第二个接收者验证。
 - ShowMeMac 的 `showme-sender` 为原生 Rust H.264/WebRTC 发送端；参考媒体与信令解耦、关键帧/周期 IDR、日志不泄露凭据的原则。不直接复制 GPL 代码；其 SSE 配对信令不能用于 Jitsi。
@@ -57,10 +57,10 @@ Go 原生客户端 → WSS XMPP / MUC / Jingle → Prosody / Jicofo
 3. CLI 加入/等待第二个参与者；Pion 媒体协商 + CLI 接收诊断工具；明确空会议等待行为。
 4. Go HTTP FLV → FFmpeg VP8/Opus → 本地 RTP → JVB。先合成测试源，再真实 FLV。
 5. 接收侧统计两路 RTP，保存 WebM/Opus 并通过 ffprobe/ffmpeg 解码确认，避免用“登录成功”冒充音视频成功。
-6. Linux 交叉编译 / Docker 构建、运行、停止清理；cmin2 优先用样本避免源站网络干扰。
+6. Linux 交叉编译 / Docker 构建、运行、停止清理；test-server 优先用样本避免源站网络干扰。
 7. 单元测试、竞态检测、失败路径、Docker/README；更新 docs/dev/VALIDATION.md 实际证据与限制。
 
-实施调整复核：新增 `--input-proxy` 只影响 HTTP-FLV，与 Jitsi 信令独立；cmin2 在不修改 Jitsi 服务的前提下，通过临时 SSH 回环代理完成实流验证，并用本地 FLV 样本完成独立于源站网络的 Docker 验证。TLS 兼容实验代码/依赖已删除，仍使用标准 Go TLS 证书校验。细节见 VALIDATION.md。
+实施调整复核：新增 `--input-proxy` 只影响 HTTP-FLV，与 Jitsi 信令独立；test-server 在不修改 Jitsi 服务的前提下，通过临时 SSH 回环代理完成实流验证，并用本地 FLV 样本完成独立于源站网络的 Docker 验证。TLS 兼容实验代码/依赖已删除，仍使用标准 Go TLS 证书校验。细节见 VALIDATION.md。
 
 ## 5. 验收等级
 
