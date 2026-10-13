@@ -72,6 +72,9 @@ Docker：
 ```bash
 docker run --rm --init --network host ghcr.io/sbinfz/jitsi_rtmp_to_conference:latest \
   --host meet.example.com --room my-room --input 'rtmp://live.example.com/app/stream'
+
+# 或用 Compose（拉流 / RTMP 推流两种模式）
+cd deploy && cp env.example .env && docker compose up -d
 ```
 
 完整参数、OBS 设置、NodeMedia 签名、代理、Docker Compose、常见问题见 **[说明书 docs/USAGE.md](docs/USAGE.md)**。
@@ -80,7 +83,10 @@ docker run --rm --init --network host ghcr.io/sbinfz/jitsi_rtmp_to_conference:la
 
 - [说明书 / 使用手册](docs/USAGE.md)
 - [编译、CI 与发布](docs/BUILD.md)
-- [需求与方案](docs/PLAN.md)、[实际验证记录](docs/VALIDATION.md)
+- [架构与代码结构](docs/ARCHITECTURE.md)
+- [部署模板 deploy/](deploy/)：Docker Compose、systemd
+- [变更记录 CHANGELOG](CHANGELOG.md)
+- 开发记录：[需求与方案](docs/dev/PLAN.md)、[实际验证记录](docs/dev/VALIDATION.md)
 - 第三方组件与许可证：[THIRD_PARTY.md](THIRD_PARTY.md)
 
 ## 范围与限制
@@ -90,13 +96,26 @@ docker run --rm --init --network host ghcr.io/sbinfz/jitsi_rtmp_to_conference:la
 - 同一进程发布一路流；多路请运行多个进程（不同 `--name`，推流模式用不同端口）。
 - 尚无人工浏览器长时观感/唇音同步验收与 24 小时稳定性测试，详见验证记录。
 
+## 项目结构
+
+```
+cmd/           jitsi-stream（转换器）、jitsi-receive（无浏览器验收工具）
+internal/      input（输入协议）· rtmpserver（推流接收）· media（FFmpeg→RTP）· conference（Jitsi 入会）
+third_party/   固定版本的 Jitsi 信令与 RTMP 库 fork、第三方许可证
+deploy/        Docker Compose、systemd 模板
+scripts/       打包、端到端验证、许可证生成
+docs/          说明书、编译、架构；docs/dev/ 开发记录
+```
+
+详见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)。
+
 ## 开发
 
 ```bash
 make build      # bin/jitsi-stream, bin/jitsi-receive
 make test       # 单元测试（含 race）；有 FFmpeg 时运行媒体/RTMP 集成测试
 make package    # 交叉编译全部平台 → dist/*.tar.gz|zip + SHA256SUMS
-scripts/verify.sh   # 真实 Jitsi 端到端验证（测试源 → 会议 → 接收并解码）
+make verify     # 真实 Jitsi 端到端验证（测试源 → 会议 → 接收并解码）
 ```
 
 许可证：MIT（新编写代码）。第三方组件许可证见 `THIRD_PARTY.md`、`NOTICES.txt`。

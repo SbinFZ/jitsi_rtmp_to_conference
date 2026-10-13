@@ -3,12 +3,35 @@ package input
 import (
 	"context"
 	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
 )
+
+func TestInputAdapters(t *testing.T) {
+	f, err := os.CreateTemp(t.TempDir(), "input-*.flv")
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	for _, source := range []string{"test", f.Name(), "rtmp://example.test/app/live", "rtsp://example.test/stream", "https://example.test/live.m3u8"} {
+		args, body, err := Source(context.Background(), Options{Input: source, Key: "", Proxy: ""})
+		if err != nil || len(args) == 0 || body != nil {
+			t.Fatalf("%s %v %v", source, args, err)
+		}
+	}
+	_, _, err = Source(context.Background(), Options{Input: f.Name(), Key: "test-key", Proxy: ""})
+	if err != nil {
+		t.Fatal("signing key must not break local files", err)
+	}
+	if _, _, err = Source(context.Background(), Options{Input: "gopher://example.test/live", Key: "", Proxy: ""}); err == nil {
+		t.Fatal("unsupported protocol")
+	}
+}
 
 // Windows paths such as C:\video.flv must not be parsed as URL scheme "c".
 func TestLocalFilePathsAllPlatforms(t *testing.T) {
@@ -61,5 +84,31 @@ func TestListenUsesIngestStream(t *testing.T) {
 	}
 	if _, _, err := Source(context.Background(), Options{Listen: true}); err == nil {
 		t.Fatal("listen without server must fail")
+	}
+}
+
+func TestInputCommandFreshURLEachAttempt(t *testing.T) {
+	n := 0
+	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n++
+		_, _ = io.WriteString(w, "FLV\x01\x05\x00\x00\x00\x09")
+	}))
+	defer s.Close()
+	opt := Options{Command: "echo ignored-line && echo " + s.URL + "/live.flv?sign=fresh", Proxy: "direct"}
+	if !opt.Live() || !opt.Refreshable() || !opt.Restartable() {
+		t.Fatal("command input must be live, refreshable and restartable")
+	}
+	for i := 0; i < 2; i++ {
+		_, body, err := Source(context.Background(), opt)
+		if err != nil {
+			t.Fatal(err)
+		}
+		body.Close()
+	}
+	if n != 2 {
+		t.Fatalf("server hit %d times", n)
+	}
+	if _, _, err := Source(context.Background(), Options{Command: "exit 3"}); err == nil {
+		t.Fatal("failing command accepted")
 	}
 }

@@ -1,6 +1,12 @@
+# Build context only needs go.mod/go.sum, cmd/, internal/, third_party/ and licenses.
 .git
+.github
 .artifacts
 bin
+dist
+docs
+deploy
+scripts
 recordings
 .env
 .env.*

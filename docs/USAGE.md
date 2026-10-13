@@ -23,8 +23,9 @@
 |---|---|
 | `jitsi-stream` / `jitsi-stream.exe` | 转换器 |
 | `jitsi-receive` / `jitsi-receive.exe` | 验收工具：以与会者身份加入，保存收到的音视频 |
-| `docs/USAGE.md` | 本说明书 |
-| `env.example` | Docker Compose 环境变量样例 |
+| `docs/` | 本说明书、编译说明、架构说明 |
+| `deploy/` | Docker Compose（`compose.yaml` + `env.example`）与 systemd 服务模板 |
+| `CHANGELOG.md` | 版本变更 |
 
 确认版本：`jitsi-stream --version`
 
@@ -237,41 +238,42 @@ docker run -d --name obs-to-jitsi --restart unless-stopped --init --network host
 - 推荐 `--network host`（Linux）：WebRTC 使用 UDP，host 网络最简单。不用 host 网络时需确保容器能访问 Jitsi 的 443/TCP 和 JVB 的 UDP 端口（docker-jitsi-meet 默认 10000/UDP）；推流模式另需 `-p 1935:1935`。
 - 镜像非 root 运行，只读根文件系统可用。
 
-### 5.2 Docker Compose
+### 5.2 Docker Compose（`deploy/`）
 
 ```bash
-cp env.example .env     # 编辑 JITSI_ROOM、STREAM_INPUT 等
-docker compose up -d
+cd deploy
+cp env.example .env     # 编辑 JITSI_ROOM、STREAM_INPUT（或 RTMP_KEY）等
+docker compose up -d    # 按 .env 中 COMPOSE_PROFILES 启动对应模式
+docker compose logs -f
 ```
+
+| `COMPOSE_PROFILES` | 服务 | 说明 |
+|---|---|---|
+| `pull`（默认） | `stream` | 拉取 `STREAM_INPUT`（HTTP-FLV/RTMP/RTSP/HLS…）进会议 |
+| `ingest` | `ingest` | RTMP 推流接收：OBS 推到 `rtmp://<主机>:${RTMP_PORT}/live`，串流密钥 `RTMP_KEY` |
+
+输入地址通过 `STREAM_INPUT` 环境变量传入，签名 URL/推流密钥不会出现在容器命令行。会议不存在导致退出时，`restart: unless-stopped` 会由 Docker 以递增间隔重启，会议开始后自动推流。使用本地构建的镜像：`.env` 中设置 `JITSI_STREAM_IMAGE=jitsi-stream:local`。
 
 ### 5.3 自行构建镜像
 
 ```bash
-docker build -t jitsi-stream .
+docker build -t jitsi-stream:local .        # 在仓库根目录
 docker buildx build --platform linux/amd64,linux/arm64 -t <registry>/jitsi-stream --push .
 ```
 
-### 5.4 systemd（裸机）
+不带 BuildKit 的旧版 Docker 只能在 x86_64 主机上构建；ARM 主机或多架构镜像请用 `docker buildx`。
 
-```ini
-# /etc/systemd/system/jitsi-stream.service
-[Unit]
-Description=Live stream to Jitsi
-After=network-online.target
-Wants=network-online.target
+### 5.4 systemd（裸机，`deploy/systemd/`）
 
-[Service]
-EnvironmentFile=/etc/jitsi-stream.env
-ExecStart=/usr/local/bin/jitsi-stream --host meet.example.com --room my-room --name 直播 --retries 10
-Restart=always
-RestartSec=10
-DynamicUser=yes
-
-[Install]
-WantedBy=multi-user.target
+```bash
+sudo install -m 755 jitsi-stream /usr/local/bin/
+sudo install -m 644 deploy/systemd/jitsi-stream.service /etc/systemd/system/
+sudo install -m 600 deploy/systemd/jitsi-stream.env.example /etc/jitsi-stream.env   # 编辑
+sudo systemctl daemon-reload && sudo systemctl enable --now jitsi-stream
+journalctl -u jitsi-stream -f
 ```
 
-`/etc/jitsi-stream.env` 中写 `STREAM_INPUT=...`、`NODEMEDIA_AUTH_KEY=...`（`chmod 600`）。
+`/etc/jitsi-stream.env` 中填写 `JITSI_HOST`、`JITSI_ROOM`、`STREAM_NAME`、`STREAM_INPUT`、`NODEMEDIA_AUTH_KEY`。服务以 `DynamicUser` 低权限运行，退出后 15 秒自动重启。
 
 ### 5.5 网络受限时
 

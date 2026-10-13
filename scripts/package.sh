@@ -31,11 +31,11 @@ for target in $TARGETS; do
     CGO_ENABLED=0 GOOS="$os" GOARCH="$goarch" GOARM="$goarm" go build -trimpath \
       -ldflags "-s -w -X main.version=$VERSION" -o "$dir/$cmd$ext" "./cmd/$cmd"
   done
-  cp README.md LICENSE THIRD_PARTY.md "$dir/"
+  cp README.md CHANGELOG.md LICENSE THIRD_PARTY.md "$dir/"
   cp third_party/NOTICES.txt "$dir/NOTICES.txt"
   mkdir -p "$dir/docs"
-  cp docs/USAGE.md docs/BUILD.md "$dir/docs/"
-  cp .env.example "$dir/env.example"
+  cp docs/USAGE.md docs/BUILD.md docs/ARCHITECTURE.md "$dir/docs/"
+  cp -R deploy "$dir/deploy"
   (
     cd "$OUT"
     if [[ "$os" == windows ]]; then

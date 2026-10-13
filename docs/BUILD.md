@@ -9,6 +9,7 @@ make build        # 当前平台 → bin/
 make test         # 单元测试 + race；装有 FFmpeg 时额外跑媒体流水线和 RTMP 鉴权集成测试
 make lint         # gofmt + go vet
 make package      # 全部平台 → dist/
+make verify       # 真实 Jitsi 端到端验证（需要 FFmpeg；JITSI_HOST 默认 m.yuanjinapp.com）
 ```
 
 国内网络可设置：`export GOPROXY=https://goproxy.cn,direct GOSUMDB=sum.golang.google.cn`
@@ -32,7 +33,15 @@ GOOS=linux   GOARCH=arm   GOARM=7 go build ./cmd/jitsi-stream
 | `jitsi-stream_<ver>_windows_amd64.zip` | windows/amd64 |
 | `jitsi-stream_<ver>_windows_arm64.zip` | windows/arm64 |
 
+每个包内含：`jitsi-stream`、`jitsi-receive`、`README.md`、`CHANGELOG.md`、`LICENSE`、`THIRD_PARTY.md`、`NOTICES.txt`、`docs/`（说明书/编译/架构）、`deploy/`（Compose、systemd 模板）。
+
 只编译部分目标：`TARGETS="linux/amd64 windows/amd64" scripts/package.sh`。版本号默认取 `git describe`，可用 `VERSION=v1.2.3` 覆盖，写入 `--version`。
+
+## 发布新版本
+
+1. 更新 `CHANGELOG.md`。
+2. `make lint test`，必要时 `make verify`。
+3. `git tag vX.Y.Z && git push origin vX.Y.Z`，等待 Release 工作流完成。
 
 ## GitHub Actions
 

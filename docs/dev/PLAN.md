@@ -58,7 +58,7 @@ Go 原生客户端 → WSS XMPP / MUC / Jingle → Prosody / Jicofo
 4. Go HTTP FLV → FFmpeg VP8/Opus → 本地 RTP → JVB。先合成测试源，再真实 FLV。
 5. 接收侧统计两路 RTP，保存 WebM/Opus 并通过 ffprobe/ffmpeg 解码确认，避免用“登录成功”冒充音视频成功。
 6. Linux 交叉编译 / Docker 构建、运行、停止清理；cmin2 优先用样本避免源站网络干扰。
-7. 单元测试、竞态检测、失败路径、Docker/README；更新 docs/VALIDATION.md 实际证据与限制。
+7. 单元测试、竞态检测、失败路径、Docker/README；更新 docs/dev/VALIDATION.md 实际证据与限制。
 
 实施调整复核：新增 `--input-proxy` 只影响 HTTP-FLV，与 Jitsi 信令独立；cmin2 在不修改 Jitsi 服务的前提下，通过临时 SSH 回环代理完成实流验证，并用本地 FLV 样本完成独立于源站网络的 Docker 验证。TLS 兼容实验代码/依赖已删除，仍使用标准 Go TLS 证书校验。细节见 VALIDATION.md。
 

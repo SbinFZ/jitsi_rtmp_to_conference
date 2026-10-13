@@ -1,0 +1,26 @@
+# Bare-metal service. Install:
+#   sudo install -m 755 jitsi-stream /usr/local/bin/
+#   sudo install -m 644 jitsi-stream.service /etc/systemd/system/
+#   sudo install -m 600 jitsi-stream.env.example /etc/jitsi-stream.env   # then edit
+#   sudo systemctl daemon-reload && sudo systemctl enable --now jitsi-stream
+# Logs: journalctl -u jitsi-stream -f
+[Unit]
+Description=Publish a live stream into a Jitsi meeting (jitsi-stream)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+EnvironmentFile=/etc/jitsi-stream.env
+# STREAM_INPUT / NODEMEDIA_AUTH_KEY are read from the environment file.
+ExecStart=/usr/local/bin/jitsi-stream --host ${JITSI_HOST} --room ${JITSI_ROOM} --name ${STREAM_NAME} --retries 10
+# Restart after input exhaustion or a missing/ended meeting.
+Restart=always
+RestartSec=15
+DynamicUser=yes
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target
