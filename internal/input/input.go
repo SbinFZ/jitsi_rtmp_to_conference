@@ -5,8 +5,10 @@ import (
 	"context"
 	"crypto/md5" // NodeMedia protocol requires MD5, not used for TLS/security hashes.
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/url"
@@ -15,6 +17,8 @@ import (
 	"regexp"
 	"strings"
 	"time"
+
+	"golang.org/x/net/http/httpproxy"
 )
 
 // SignNodeMedia generates a fresh PLAY signature. FLV extension is excluded.
@@ -42,8 +46,14 @@ func Redact(s string) string {
 // Options describes one external media input.
 type Options struct {
 	Input string // URL, local file, "-" (stdin) or "test"
-	Key   string // optional NodeMedia PLAY signing key (HTTP-FLV / RTMP pull)
-	Proxy string // optional HTTP-FLV-only proxy
+	// Command, when set, is run before EVERY connection attempt and its last
+	// non-empty stdout line is used as the input URL. For sources that hand
+	// out one-time / short-lived URLs (anything other than NodeMedia keys).
+	Command string
+	Key     string // optional NodeMedia PLAY signing key (HTTP-FLV / RTMP pull)
+	// Proxy for HTTP-FLV only: "" = auto (HTTPS_PROXY env, else the OS/browser
+	// system proxy on macOS/Windows), "direct" = none, or an explicit URL.
+	Proxy string
 	// Listen: the input URL is a local RTMP ingest (see internal/rtmpserver);
 	// Next blocks until an authorized encoder publishes, returning its FLV.
 	Listen bool
@@ -69,12 +79,25 @@ func IsFile(source string) (string, bool) {
 }
 
 // Restartable reports whether the input can be reopened after it ends/fails.
-func (o Options) Restartable() bool { return o.Input != "-" }
+func (o Options) Restartable() bool { return o.Input != "-" || o.Command != "" }
+
+// Refreshable reports whether a reconnect gets a NEW credential (fresh
+// NodeMedia signature or a new URL from Command). Without it, a one-time
+// signed URL cannot be reused after the first connection.
+func (o Options) Refreshable() bool { return o.Key != "" || o.Command != "" }
+
+var signatureParam = regexp.MustCompile(`(?i)[?&](sign|sig|token|auth_key|auth|expires|signature)=`)
+
+// HasSignature reports a URL that carries a (possibly one-time) credential.
+func HasSignature(raw string) bool { return signatureParam.MatchString(raw) }
+
+// ErrUnauthorized: the source refused the credential (HTTP 401/403).
+var ErrUnauthorized = errors.New("source refused the URL credential")
 
 // Live reports a network source whose normal end means "reconnect", unlike a
 // file/stdin/test source whose end means "finished".
 func (o Options) Live() bool {
-	if o.Listen {
+	if o.Listen || o.Command != "" {
 		return true
 	}
 	if o.Input == "-" || o.Input == "test" {
@@ -88,6 +111,12 @@ func (o Options) Live() bool {
 // HTTP FLV is fetched by Go to avoid platform-dependent FFmpeg TLS stacks.
 func Source(ctx context.Context, opt Options) ([]string, io.ReadCloser, error) {
 	source, key, proxy := opt.Input, opt.Key, opt.Proxy
+	if opt.Command != "" {
+		var err error
+		if source, err = runInputCommand(ctx, opt.Command); err != nil {
+			return nil, nil, err
+		}
+	}
 	if opt.Listen {
 		if opt.Next == nil {
 			return nil, nil, fmt.Errorf("RTMP ingest server is not running")
@@ -156,15 +185,43 @@ func (c idleConn) Read(p []byte) (int, error) {
 	return c.Conn.Read(p)
 }
 
-func fetchFLV(ctx context.Context, source, proxy string) (io.ReadCloser, error) {
-	proxyFunc := http.ProxyFromEnvironment
-	if proxy != "" {
+// ProxyFor resolves the HTTP-FLV proxy for target (see Options.Proxy) and a
+// human-readable description for logs. nil = direct connection.
+func ProxyFor(target *url.URL, proxy string) (*url.URL, string, error) {
+	switch strings.ToLower(strings.TrimSpace(proxy)) {
+	case "direct", "none", "off":
+		return nil, "direct (--input-proxy direct)", nil
+	case "", "auto", "system":
+	default:
 		u, err := url.Parse(proxy)
 		if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https" && u.Scheme != "socks5" && u.Scheme != "socks5h") {
-			return nil, fmt.Errorf("invalid input proxy URL")
+			return nil, "", fmt.Errorf("invalid --input-proxy (use http://, https://, socks5://, direct)")
 		}
-		proxyFunc = http.ProxyURL(u)
+		return u, "--input-proxy " + Redact(u.Redacted()), nil
 	}
+	if u, err := httpproxy.FromEnvironment().ProxyFunc()(target); err == nil && u != nil {
+		return u, "environment HTTPS_PROXY/HTTP_PROXY " + Redact(u.Redacted()), nil
+	}
+	cfg, err := readSystemProxy()
+	if err == nil {
+		if u := cfg.pick(target); u != nil {
+			return u, "system proxy " + u.String(), nil
+		}
+	}
+	return nil, "direct (no proxy configured)", nil
+}
+
+func fetchFLV(ctx context.Context, source, proxy string) (io.ReadCloser, error) {
+	target, err := url.Parse(source)
+	if err != nil {
+		return nil, fmt.Errorf("invalid FLV URL")
+	}
+	proxyURL, how, err := ProxyFor(target, proxy)
+	if err != nil {
+		return nil, err
+	}
+	slog.Info("HTTP-FLV connecting", "via", how)
+	proxyFunc := http.ProxyURL(proxyURL)
 	d := &net.Dialer{Timeout: 10 * time.Second, KeepAlive: 20 * time.Second}
 	tr := &http.Transport{
 		Proxy: proxyFunc,
@@ -192,7 +249,10 @@ func fetchFLV(ctx context.Context, source, proxy string) (io.ReadCloser, error) 
 	if resp.StatusCode != http.StatusOK {
 		resp.Body.Close()
 		tr.CloseIdleConnections()
-		return nil, fmt.Errorf("FLV source returned HTTP %d (401 may mean expired/single-use signature)", resp.StatusCode)
+		if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+			return nil, fmt.Errorf("FLV source returned HTTP %d: %w (expired or already-used one-time signature)", resp.StatusCode, ErrUnauthorized)
+		}
+		return nil, fmt.Errorf("FLV source returned HTTP %d", resp.StatusCode)
 	}
 	header := make([]byte, 9)
 	if _, err := io.ReadFull(resp.Body, header); err != nil || string(header[:3]) != "FLV" || header[3] != 1 {

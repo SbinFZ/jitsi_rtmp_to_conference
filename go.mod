@@ -10,6 +10,8 @@ require (
 	github.com/yutopp/go-flv v0.3.1
 	github.com/yutopp/go-rtmp v0.0.7
 	github.com/zarazaex69/j v0.0.0
+	golang.org/x/net v0.50.0
+	golang.org/x/sys v0.41.0
 )
 
 require (
@@ -35,8 +37,7 @@ require (
 	github.com/wlynxg/anet v0.0.5 // indirect
 	github.com/yutopp/go-amf0 v0.1.0 // indirect
 	golang.org/x/crypto v0.48.0 // indirect
-	golang.org/x/net v0.50.0 // indirect
-	golang.org/x/sys v0.41.0 // indirect
+	golang.org/x/text v0.34.0 // indirect
 	golang.org/x/time v0.14.0 // indirect
 )
 

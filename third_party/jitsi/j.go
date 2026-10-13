@@ -2,6 +2,7 @@ package j
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"net"
@@ -27,7 +28,15 @@ type Config struct {
 	// HTTPClient is used for config discovery, XMPP/BOSH, and Colibri WebSockets.
 	// When set, it takes precedence over Insecure.
 	HTTPClient *http.Client
+	// RequireExistingRoom: JoinMUC fails with ErrRoomNotFound instead of
+	// creating the meeting when no participant is in the room yet. Checked
+	// before focus allocation (which would create the room).
+	RequireExistingRoom bool
 }
+
+// ErrRoomNotFound is returned by JoinMUC when RequireExistingRoom is set and
+// the meeting does not exist (no participant besides the focus).
+var ErrRoomNotFound = xmpp.ErrRoomNotFound
 
 type ICEServer struct {
 	URLs       []string
@@ -510,6 +519,21 @@ func JoinMUC(ctx context.Context, cfg Config) (*Session, error) {
 	conn, httpClient, err := xmpp.Dial(ctx, cfg.Host, cfg.Room, cfg.Debug, cfg.Insecure, cfg.HTTPClient)
 	if err != nil {
 		return nil, fmt.Errorf("xmpp dial: %w", err)
+	}
+
+	if cfg.RequireExistingRoom {
+		n, err := conn.RoomOccupants(cfg.Room, 10*time.Second)
+		// Only the focus left (n == 1): the conference is ending; treat as absent.
+		if err == nil && n >= 0 && n <= 1 {
+			err = ErrRoomNotFound
+		}
+		if err != nil {
+			_ = conn.Close()
+			if errors.Is(err, ErrRoomNotFound) {
+				return nil, ErrRoomNotFound
+			}
+			return nil, fmt.Errorf("query room: %w", err)
+		}
 	}
 
 	if err := conn.AllocateFocus(ctx, cfg.Room); err != nil {

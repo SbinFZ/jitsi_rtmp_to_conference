@@ -20,8 +20,14 @@ type Config struct {
 	JoinTimeout, ConnectTimeout time.Duration
 	Debug                       bool
 	PublishAudio, PublishVideo  bool
-	OnTrack                     func(*webrtc.PeerConnection, *webrtc.TrackRemote, *webrtc.RTPReceiver)
+	// RequireMeeting: fail with ErrMeetingNotFound instead of creating the
+	// meeting when nobody has started it.
+	RequireMeeting bool
+	OnTrack        func(*webrtc.PeerConnection, *webrtc.TrackRemote, *webrtc.RTPReceiver)
 }
+
+// ErrMeetingNotFound: the room has no participants (meeting not started or ended).
+var ErrMeetingNotFound = j.ErrRoomNotFound
 
 type Connection struct {
 	Session      *j.Session
@@ -57,7 +63,7 @@ func Join(ctx context.Context, cfg Config) (_ *Connection, err error) {
 	}
 	joinCtx, cancel := context.WithTimeout(ctx, cfg.JoinTimeout)
 	defer cancel()
-	sess, err := j.JoinMUC(joinCtx, j.Config{Host: host, Room: room, Nick: cfg.Name, Debug: cfg.Debug})
+	sess, err := j.JoinMUC(joinCtx, j.Config{Host: host, Room: room, Nick: cfg.Name, Debug: cfg.Debug, RequireExistingRoom: cfg.RequireMeeting})
 	if err != nil {
 		return nil, err
 	}

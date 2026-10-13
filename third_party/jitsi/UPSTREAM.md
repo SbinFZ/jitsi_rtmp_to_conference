@@ -13,6 +13,7 @@ Local changes:
 - Bound WS writes to 10s; acknowledge session-accept by IQ and reject IQ errors without logging raw credentials.
 - Expose transport Done channel so application stanza drainers exit rather than leak.
 - Mark presence `botType=poltergeist` and reject non-focus (P2P) Jingle so a peer offer cannot replace or terminate the JVB session.
+- `Config.RequireExistingRoom` / `Conn.RoomOccupants`: check the room exists via disco#info BEFORE focus allocation (which creates rooms); handles Prosody `muc_hide_all` (`forbidden` = exists, `item-not-found` = absent).
 - Remove unsupported JSON-source and TCC capability advertisements (XML source signalling, Pion NACK, periodic keyframes used instead).
 
 Compatibility and security regression tests added under internal/xmpp and internal/jingle. The protocol is tested against stable-10314; upstream updates must be revalidated.

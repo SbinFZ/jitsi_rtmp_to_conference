@@ -34,3 +34,30 @@ func TestPeerJingleCannotOverwriteFocusOffer(t *testing.T) {
 		t.Fatal("focus blocked")
 	}
 }
+
+func TestRoomOccupants(t *testing.T) {
+	for _, tc := range []struct {
+		reply string
+		n     int
+		err   error
+	}{
+		{`<iq id="ID" type="error" xmlns="jabber:client"><error type="cancel"><item-not-found xmlns="urn:ietf:params:xml:ns:xmpp-stanzas"/></error></iq>`, 0, ErrRoomNotFound},
+		{`<iq id="ID" type="error" xmlns="jabber:client"><error type="auth"><forbidden xmlns="urn:ietf:params:xml:ns:xmpp-stanzas"/></error></iq>`, -1, nil},
+		{`<iq id="ID" type="result" xmlns="jabber:client"><query><x><field var='muc#roominfo_occupants' label='n'><value>3</value></field></x></query></iq>`, 3, nil},
+	} {
+		mt := newMockTransport()
+		c := newTestConn(mt)
+		go c.readLoop()
+		go func() {
+			sent := string(<-mt.outgoing)
+			id := sent[strings.Index(sent, `id="`)+4:]
+			id = id[:strings.Index(id, `"`)]
+			mt.inject(strings.Replace(tc.reply, `"ID"`, `"`+id+`"`, 1))
+		}()
+		n, err := c.RoomOccupants("testroom", time.Second)
+		if n != tc.n || err != tc.err {
+			t.Errorf("reply %.40s: n=%d err=%v want %d %v", tc.reply, n, err, tc.n, tc.err)
+		}
+		c.Close()
+	}
+}

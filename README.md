@@ -22,6 +22,9 @@ RTSP / HLS / 文件 ─┘        └── XMPP/Jingle 原生入会（匿名）
 | NodeMedia 签名 | 设置 `NODEMEDIA_AUTH_KEY`，自动生成 `sign=` | ✅ |
 
 - 输入中断后自动重连；**与会者保持在会议中**（RTP 序列号/时间戳连续），无媒体时自动显示为静音头像。
+- 一次性签名 URL：用签名密钥自动重签，或 `--input-cmd` 每次重连前获取新地址；无法刷新时遇 401 立即给出提示退出。
+- 会议不存在时不会自己开空会议：二进制指数退避重试 5 次（1s→16s）后退出（`--meeting-retries 0` 可关闭）。
+- HTTP-FLV 自动使用系统代理（macOS/Windows，与浏览器一致）或 `HTTPS_PROXY`。
 - RTMP 推流模式：app + 推流密钥在 RTMP 握手阶段校验（常量时间比较），同一时间只接受一个推流端；会议未就绪时丢弃而不是积压，推流软件不会卡住。
 - 优雅退出（Ctrl+C / SIGTERM）：停止 FFmpeg、退出会议，不留“幽灵与会者”。
 - 日志自动隐藏 URL 中的 `sign/token/key/password` 等敏感参数。
@@ -56,7 +59,7 @@ jitsi-stream --host meet.example.com --room my-room --name 'OBS' \
 jitsi-stream --host meet.example.com --room my-room --input 'https://cdn.example.com/live/stream.flv'
 ```
 
-然后用浏览器打开 `https://meet.example.com/my-room` 即可看到/听到。注意：**Jitsi 在会议里有第二个人之前不会建立媒体连接**，工具会提示等待（默认 5 分钟）。
+**先在浏览器打开 `https://meet.example.com/my-room` 开始会议**，再启动转换器（会议不存在时会以 1s、2s、4s、8s、16s 退避重试 5 次后退出）。
 
 Windows（PowerShell）示例：
 

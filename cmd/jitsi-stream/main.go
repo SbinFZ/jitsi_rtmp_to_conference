@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -29,18 +30,26 @@ type options struct {
 	duration time.Duration
 	retries  int
 	ingest   rtmpserver.Endpoint
+	// meeting existence: retries with binary exponential backoff
+	meetingRetries int
+	meetingBackoff time.Duration
 }
 
 func parse() (options, error) {
 	var o options
 	cc, mc := &o.conf, &o.media
 	var showVersion bool
+	var keyFile string
 	flag.StringVar(&cc.Host, "host", "m.yuanjinapp.com", "Jitsi hostname / HTTPS origin")
 	flag.StringVar(&cc.Room, "room", "", "meeting room name (required)")
 	flag.StringVar(&cc.Name, "name", "Live Stream", "participant display name")
 	flag.StringVar(&mc.Input.Input, "input", "", "input: HTTP(S)-FLV / rtmp(s):// / rtsp:// / HLS URL, local file, - (stdin) or test; env STREAM_INPUT")
+	flag.StringVar(&mc.Input.Command, "input-cmd", "", "shell command printing a FRESH input URL; run before every (re)connect (for one-time URLs)")
+	flag.StringVar(&keyFile, "sign-key-file", "", "file containing the NodeMedia signing key (alternative to env NODEMEDIA_AUTH_KEY)")
+	flag.IntVar(&o.meetingRetries, "meeting-retries", 5, "if the meeting does not exist, retry this many times with exponential backoff, then exit (0 = do not check; create/wait for the meeting)")
+	flag.DurationVar(&o.meetingBackoff, "meeting-backoff", time.Second, "first backoff delay when the meeting does not exist; doubles each retry (1s,2s,4s,8s,16s)")
 	flag.BoolVar(&mc.Input.Listen, "listen", false, "act as RTMP server for --input rtmp://bind:port/app/streamkey; encoders (OBS) push to it")
-	flag.StringVar(&mc.Input.Proxy, "input-proxy", "", "proxy for HTTP-FLV input only (http/https/socks5), e.g. http://127.0.0.1:7897")
+	flag.StringVar(&mc.Input.Proxy, "input-proxy", "", "HTTP-FLV proxy: empty = auto (HTTPS_PROXY env, else macOS/Windows system proxy), direct, or http(s)://|socks5://host:port")
 	flag.StringVar(&mc.FFmpeg, "ffmpeg", "ffmpeg", "FFmpeg executable")
 	flag.IntVar(&mc.Height, "height", 720, "output video height (even)")
 	flag.IntVar(&mc.FPS, "fps", 25, "output frame rate")
@@ -60,8 +69,14 @@ func parse() (options, error) {
 	if mc.Input.Input == "" {
 		mc.Input.Input = os.Getenv("STREAM_INPUT")
 	}
-	if cc.Room == "" || mc.Input.Input == "" {
-		return o, fmt.Errorf("--room and --input are required; see --help")
+	if mc.Input.Input != "" && mc.Input.Command != "" {
+		return o, fmt.Errorf("use either --input or --input-cmd, not both")
+	}
+	if cc.Room == "" || (mc.Input.Input == "" && mc.Input.Command == "") {
+		return o, fmt.Errorf("--room and --input (or --input-cmd) are required; see --help")
+	}
+	if o.meetingRetries < 0 || o.meetingRetries > 30 || o.meetingBackoff <= 0 {
+		return o, fmt.Errorf("--meeting-retries must be 0..30 and --meeting-backoff positive")
 	}
 	if mc.Height < 144 || mc.Height > 2160 || mc.Height%2 != 0 || mc.FPS < 1 || mc.FPS > 60 ||
 		mc.VideoKbps < 100 || mc.VideoKbps > 20000 || o.retries < 0 || cc.JoinTimeout <= 0 ||
@@ -86,6 +101,18 @@ func parse() (options, error) {
 		o.retries = 0 // consumed stdin cannot be reopened
 	}
 	mc.Input.Key = os.Getenv("NODEMEDIA_AUTH_KEY")
+	if keyFile != "" {
+		b, err := os.ReadFile(keyFile)
+		if err != nil {
+			return o, fmt.Errorf("--sign-key-file: %w", err)
+		}
+		mc.Input.Key = strings.TrimSpace(string(b))
+	}
+	if mc.Input.Input != "" && input.HasSignature(mc.Input.Input) && !mc.Input.Refreshable() {
+		slog.Warn("input URL carries a signature that may be one-time/expiring: a reconnect will be refused (HTTP 401). " +
+			"For automatic re-signing set NODEMEDIA_AUTH_KEY or --sign-key-file, or use --input-cmd to fetch a fresh URL")
+	}
+	cc.RequireMeeting = o.meetingRetries > 0
 	cc.PublishAudio, cc.PublishVideo = !mc.NoAudio, true
 	return o, nil
 }
@@ -150,8 +177,21 @@ func (s *supervisor) fail(ctx context.Context, err error) error {
 }
 
 func (s *supervisor) loop(ctx context.Context) error {
+	missing := 0 // consecutive "meeting does not exist" answers
 	for ctx.Err() == nil {
 		c, err := conference.Join(ctx, s.o.conf)
+		if errors.Is(err, conference.ErrMeetingNotFound) {
+			if missing >= s.o.meetingRetries {
+				return fmt.Errorf("meeting %q does not exist (nobody has joined it); gave up after %d retries — start the meeting first or use --meeting-retries 0 to create it", s.o.conf.Room, s.o.meetingRetries)
+			}
+			delay := s.o.meetingBackoff << missing // binary exponential: 1s,2s,4s,8s,16s
+			missing++
+			slog.Warn("meeting does not exist yet; retrying", "room", s.o.conf.Room, "retry", missing, "max", s.o.meetingRetries, "delay", delay)
+			if sleep(ctx, delay) != nil {
+				return nil
+			}
+			continue
+		}
 		if err != nil {
 			if ctx.Err() != nil {
 				return nil
@@ -161,6 +201,7 @@ func (s *supervisor) loop(ctx context.Context) error {
 			}
 			continue
 		}
+		missing = 0
 		err = s.session(ctx, c)
 		c.Close()
 		if errors.Is(err, errInputFinished) {
@@ -221,6 +262,11 @@ func (s *supervisor) session(ctx context.Context, c *conference.Connection) erro
 			}
 			if !s.o.media.Input.Restartable() {
 				return err
+			}
+			// A one-time URL cannot be reused: retrying the same credential is
+			// pointless, so stop immediately with an actionable message.
+			if errors.Is(err, input.ErrUnauthorized) && !s.o.media.Input.Refreshable() {
+				return fmt.Errorf("%w; the one-time URL cannot be reused after a disconnect: set NODEMEDIA_AUTH_KEY / --sign-key-file to re-sign automatically, or use --input-cmd to fetch a fresh URL", err)
 			}
 			if e := s.fail(sctx, err); e != nil {
 				return e
