@@ -3,7 +3,11 @@
 # only the Debian runtime layer (FFmpeg) is per-architecture.
 #   docker build -t jitsi-stream .
 #   docker buildx build --platform linux/amd64,linux/arm64 -t jitsi-stream .
-FROM --platform=$BUILDPLATFORM golang:1.25-bookworm AS build
+# BuildKit sets BUILDPLATFORM/TARGET*. The defaults below only make a plain
+# legacy-builder `docker build` work on x86_64 hosts; on ARM hosts or for
+# multi-arch images use BuildKit (docker buildx).
+ARG BUILDPLATFORM=linux/amd64
+FROM --platform=${BUILDPLATFORM} golang:1.25-bookworm AS build
 ARG TARGETOS=linux TARGETARCH=amd64 TARGETVARIANT=""
 ARG VERSION=dev
 ARG GOPROXY=https://proxy.golang.org,direct
