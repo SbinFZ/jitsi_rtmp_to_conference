@@ -4,7 +4,6 @@ import (
 	"context"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -57,14 +56,24 @@ func TestBuildSDPAndFFmpegArgs(t *testing.T) {
 }
 
 func TestBroadcasterWithSinkCommand(t *testing.T) {
+	if os.Getenv("GO_TEST_NDI_SINK_HELPER") == "1" {
+		data := os.Getenv("JITSI_NDI_NAME") + "|" + os.Getenv("JITSI_ENDPOINT")
+		marker := os.Getenv("TEST_NDI_MARKER")
+		_ = os.WriteFile(marker+".tmp", []byte(data), 0644)
+		_ = os.Rename(marker+".tmp", marker)
+		return
+	}
+
 	tmp := t.TempDir()
 	marker := filepath.Join(tmp, "env.txt")
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatalf("os.Executable: %v", err)
+	}
+	t.Setenv("GO_TEST_NDI_SINK_HELPER", "1")
 	t.Setenv("TEST_NDI_MARKER", marker)
 
-	sinkCmd := `printf '%s|%s' "$JITSI_NDI_NAME" "$JITSI_ENDPOINT" > "$TEST_NDI_MARKER"`
-	if runtime.GOOS == "windows" {
-		sinkCmd = `echo %JITSI_NDI_NAME%^|%JITSI_ENDPOINT%> "%TEST_NDI_MARKER%"`
-	}
+	sinkCmd := `"` + exe + `" -test.run=TestBroadcasterWithSinkCommand`
 
 	b := NewBroadcaster(Config{
 		Enabled: true,
@@ -73,7 +82,9 @@ func TestBroadcasterWithSinkCommand(t *testing.T) {
 		OutDir:  tmp,
 		SinkCmd: sinkCmd,
 	})
-	defer b.Close()
+	defer func() {
+		_ = b.Close()
+	}()
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -104,7 +115,7 @@ func TestBroadcasterWithSinkCommand(t *testing.T) {
 		t.Fatalf("unexpected active sources: %v", sources)
 	}
 
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
 		data, err := os.ReadFile(marker)
 		if err == nil && len(data) > 0 {
@@ -112,9 +123,11 @@ func TestBroadcasterWithSinkCommand(t *testing.T) {
 			if got != "Jitsi (testroom) - Charlie [ep01]|ep01" {
 				t.Fatalf("unexpected sink env marker: %q", got)
 			}
+			_ = b.Close()
 			return
 		}
 		time.Sleep(25 * time.Millisecond)
 	}
+	_ = b.Close()
 	t.Fatalf("timed out waiting for sink command to write marker file")
 }
