@@ -63,11 +63,17 @@ type XMLParameter struct {
 	Value string `xml:"value,attr"`
 }
 
+type XMLSSRCInfo struct {
+	XMLNS string `xml:"xmlns,attr"`
+	Owner string `xml:"owner,attr"`
+}
+
 type XMLSource struct {
 	XMLNS      string         `xml:"xmlns,attr"`
 	SSRC       string         `xml:"ssrc,attr"`
 	Name       string         `xml:"name,attr"`
 	VideoType  string         `xml:"videoType,attr"`
+	SSRCInfo   *XMLSSRCInfo   `xml:"ssrc-info"`
 	Parameters []XMLParameter `xml:"parameter"`
 }
 

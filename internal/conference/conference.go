@@ -24,6 +24,7 @@ type Config struct {
 	// meeting when nobody has started it.
 	RequireMeeting bool
 	OnTrack        func(*webrtc.PeerConnection, *webrtc.TrackRemote, *webrtc.RTPReceiver)
+	OnSourceUpdate func(TrackSourceInfo)
 }
 
 // ErrMeetingNotFound: the room has no participants (meeting not started or ended).
@@ -33,6 +34,7 @@ type Connection struct {
 	Session      *j.Session
 	PC           *webrtc.PeerConnection
 	Audio, Video *webrtc.TrackLocalStaticRTP
+	Participants *ParticipantRegistry
 	Done         chan error
 	name         string
 	closeOnce    sync.Once
@@ -67,7 +69,9 @@ func Join(ctx context.Context, cfg Config) (_ *Connection, err error) {
 	if err != nil {
 		return nil, err
 	}
-	c := &Connection{Session: sess, Done: make(chan error, 1)}
+	reg := NewParticipantRegistry(cfg.OnSourceUpdate)
+	reg.SyncNicks(sess.EndpointDisplayNames())
+	c := &Connection{Session: sess, Participants: reg, Done: make(chan error, 1)}
 	defer func() {
 		if err != nil {
 			c.Close()
@@ -85,6 +89,7 @@ func Join(ctx context.Context, cfg Config) (_ *Connection, err error) {
 			case <-ctx.Done():
 				return
 			case stanza := <-sess.Conn.Stanzas():
+				reg.IngestStanza(stanza, sess)
 				if isTermination(stanza, sess.RoomJID+"/focus") {
 					c.fail(fmt.Errorf("Jitsi session terminated; reconnect required"))
 				}
@@ -94,6 +99,7 @@ func Join(ctx context.Context, cfg Config) (_ *Connection, err error) {
 	if err = sess.WaitMedia(joinCtx); err != nil {
 		return nil, err
 	}
+	reg.IngestStanza(sess.Conn.LastJingleStanza(), sess)
 	pc, err := webrtc.NewPeerConnection(sess.IceConfig())
 	if err != nil {
 		return nil, err

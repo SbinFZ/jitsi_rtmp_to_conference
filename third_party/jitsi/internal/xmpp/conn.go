@@ -48,28 +48,29 @@ func (t *wsTransport) Close() error {
 }
 
 type Conn struct {
-	tr         transport
-	host       string
-	room       string
-	mucDomain  string // e.g. "muc.meet1.arbitr.ru" or "conference.meet1.arbitr.ru"
-	xmppDomain string // XMPP virtualhost — usually equals host, but docker-jitsi-meet uses "meet.jitsi"
-	jid        string
-	nick       string
-	debug      bool
-	anonymous  bool
-	bosh       bool // true when using BOSH transport (no stream management)
-	focusInfo  FocusInfo
-	mu         sync.Mutex
-	ackH       atomic.Int64
-	idSeq      atomic.Int64
-	lastJngMu  sync.Mutex
-	lastJng    string
-	occMu      sync.Mutex
-	occupants  map[string]struct{} // MUC nick → present (excluding self and "focus")
-	stanzas    chan string
-	jingles    chan string
-	closed     chan struct{}
-	closeOnce  sync.Once
+	tr           transport
+	host         string
+	room         string
+	mucDomain    string // e.g. "muc.meet1.arbitr.ru" or "conference.meet1.arbitr.ru"
+	xmppDomain   string // XMPP virtualhost — usually equals host, but docker-jitsi-meet uses "meet.jitsi"
+	jid          string
+	nick         string
+	debug        bool
+	anonymous    bool
+	bosh         bool // true when using BOSH transport (no stream management)
+	focusInfo    FocusInfo
+	mu           sync.Mutex
+	ackH         atomic.Int64
+	idSeq        atomic.Int64
+	lastJngMu    sync.Mutex
+	lastJng      string
+	occMu        sync.Mutex
+	occupants    map[string]struct{} // MUC nick → present (excluding self and "focus")
+	occupantNick map[string]string   // MUC resource (endpoint ID) → display name (<nick>)
+	stanzas      chan string
+	jingles      chan string
+	closed       chan struct{}
+	closeOnce    sync.Once
 
 	// waitMu protects the per-stanza waiter maps below.
 	waitMu sync.Mutex
@@ -172,17 +173,18 @@ func Dial(
 	ws.SetReadLimit(1 << 20)
 
 	c := &Conn{
-		tr:         &wsTransport{ws: ws},
-		host:       host,
-		room:       room,
-		mucDomain:  cfg.mucDomain,
-		xmppDomain: cfg.xmppDomain,
-		debug:      debug,
-		occupants:  make(map[string]struct{}),
-		stanzas:    make(chan string, 64),
-		jingles:    make(chan string, 8),
-		closed:     make(chan struct{}),
-		iqWaiters:  make(map[string]chan string),
+		tr:           &wsTransport{ws: ws},
+		host:         host,
+		room:         room,
+		mucDomain:    cfg.mucDomain,
+		xmppDomain:   cfg.xmppDomain,
+		debug:        debug,
+		occupants:    make(map[string]struct{}),
+		occupantNick: make(map[string]string),
+		stanzas:      make(chan string, 64),
+		jingles:      make(chan string, 8),
+		closed:       make(chan struct{}),
+		iqWaiters:    make(map[string]chan string),
 	}
 
 	if err := c.auth(ctx); err != nil {
@@ -618,9 +620,37 @@ func (c *Conn) trackPresence(msg string) {
 	defer c.occMu.Unlock()
 	if strings.Contains(msg, `type='unavailable'`) || strings.Contains(msg, `type="unavailable"`) {
 		delete(c.occupants, nick)
+		delete(c.occupantNick, nick)
 	} else {
 		c.occupants[nick] = struct{}{}
+		if display := extractPresenceNick(msg); display != "" {
+			c.occupantNick[nick] = display
+		}
 	}
+}
+
+func extractPresenceNick(msg string) string {
+	type xmlPresence struct {
+		Nick string `xml:"nick"`
+	}
+	var p xmlPresence
+	if err := xml.Unmarshal([]byte(msg), &p); err == nil && strings.TrimSpace(p.Nick) != "" {
+		return strings.TrimSpace(p.Nick)
+	}
+	start := strings.Index(msg, "<nick")
+	if start < 0 {
+		return ""
+	}
+	gt := strings.IndexByte(msg[start:], '>')
+	if gt < 0 {
+		return ""
+	}
+	contentStart := start + gt + 1
+	end := strings.Index(msg[contentStart:], "</nick>")
+	if end < 0 {
+		return ""
+	}
+	return strings.TrimSpace(msg[contentStart : contentStart+end])
 }
 
 // Occupants returns the list of MUC nicks (other participants) currently in the room.
@@ -633,6 +663,21 @@ func (c *Conn) Occupants() []string {
 		out = append(out, n)
 	}
 	return out
+}
+
+// OccupantDisplayName returns the display name (<nick>) advertised by the given
+// MUC endpoint ID, or "" if unknown.
+func (c *Conn) OccupantDisplayName(endpoint string) string {
+	c.occMu.Lock()
+	defer c.occMu.Unlock()
+	return c.occupantNick[endpoint]
+}
+
+// OccupantDisplayNames returns a snapshot map of endpoint ID -> display name (<nick>).
+func (c *Conn) OccupantDisplayNames() map[string]string {
+	c.occMu.Lock()
+	defer c.occMu.Unlock()
+	return cloneStringMap(c.occupantNick)
 }
 
 func (c *Conn) handleDiscoQuery(msg string) {
@@ -1355,18 +1400,19 @@ func dialBOSH(
 	}
 
 	c := &Conn{
-		tr:         bt,
-		host:       host,
-		room:       room,
-		mucDomain:  cfg.mucDomain,
-		xmppDomain: cfg.xmppDomain,
-		debug:      debug,
-		bosh:       true,
-		occupants:  make(map[string]struct{}),
-		stanzas:    make(chan string, 64),
-		jingles:    make(chan string, 8),
-		closed:     make(chan struct{}),
-		iqWaiters:  make(map[string]chan string),
+		tr:           bt,
+		host:         host,
+		room:         room,
+		mucDomain:    cfg.mucDomain,
+		xmppDomain:   cfg.xmppDomain,
+		debug:        debug,
+		bosh:         true,
+		occupants:    make(map[string]struct{}),
+		occupantNick: make(map[string]string),
+		stanzas:      make(chan string, 64),
+		jingles:      make(chan string, 8),
+		closed:       make(chan struct{}),
+		iqWaiters:    make(map[string]chan string),
 	}
 
 	if err := c.authBOSH(ctx, bt); err != nil {

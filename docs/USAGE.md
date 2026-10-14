@@ -287,17 +287,26 @@ journalctl -u jitsi-stream -f
 
 ---
 
-## 6. 验收：不用浏览器确认音视频
+## 6. 验收、按参会者录制与 NDI 广播（不用浏览器 / 零 GStreamer）
 
-`jitsi-receive` 以另一个与会者身份加入，请求视频转发，把收到的 VP8/Opus 存为文件：
+`jitsi-receive` 以与会者身份加入，请求视频转发，自动解析 XMPP `<presence>` 昵称与 Jingle `session-initiate` / `source-add` 中的 SSRC 归属，把收到的每个参会者 VP8/Opus 存为文件，并支持将每路参会者音视频流通过 NDI 实时广播给 OBS / vMix：
 
 ```bash
+# 1. 端到端录制验收（同时生成 audio-<ssrc>.ogg, video-<ssrc>.ivf, user-<name>-<endpoint>-*.ivf/ogg 和 participants.json）
 jitsi-receive --host meet.example.com --room test-room --duration 60s --out recordings &
 jitsi-stream  --host meet.example.com --room test-room --input test --duration 45s
 wait
 ffprobe recordings/video-*.ivf      # VP8 分辨率
 ffmpeg -v error -i recordings/video-<ssrc>.ivf -f null -   # 无输出 = 解码无误
 ffmpeg -v error -i recordings/audio-<ssrc>.ogg -f null -
+
+# 2. 广播所有参会者的独立音视频流到 NDI（如 "Jitsi (test-room) - Alice [422ab3db]"）
+jitsi-receive --host meet.example.com --room test-room --out recordings \
+  --ndi --ndi-prefix "Jitsi"
+
+# 3. 使用自定义单用户转流命令（通过环境变量传入 JITSI_NDI_NAME, JITSI_SDP_PATH 等）
+jitsi-receive --host meet.example.com --room test-room --out recordings \
+  --ndi --ndi-cmd 'ffmpeg -protocol_whitelist file,udp,rtp -i "$JITSI_SDP_PATH" -c copy "recordings/${JITSI_ENDPOINT}.webm"'
 ```
 
 `jitsi-receive` 退出码 0 表示音视频都收到了（只验视频加 `--video-only`）。仓库中的 `scripts/verify.sh` 自动完成以上步骤。

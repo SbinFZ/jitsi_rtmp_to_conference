@@ -80,6 +80,10 @@ jitsi-stream --host meet.example.com --room team-sync --name "OBS Stream" \
 jitsi-stream --host meet.example.com --room team-sync \
   --input "https://cdn.example.com/live/feed.flv" \
   --height 1080 --fps 30 --bitrate 3000
+
+# Record & broadcast all remote participants' streams via NDI (zero GStreamer dependency)
+jitsi-receive --host meet.example.com --room team-sync \
+  --out recordings --ndi --ndi-prefix "Jitsi"
 ```
 
 #### 3. Docker & Docker Compose
@@ -135,6 +139,10 @@ jitsi-stream --host meet.example.com --room my-room --name "监控流" \
 # 3. 循环播放本地宣传视频到会议室
 jitsi-stream --host meet.example.com --room my-room --name "宣传片" \
   --input "/data/videos/promo.mp4"
+
+# 4. 按参会者录制所有人的音视频流并通过 NDI 广播（零 GStreamer 依赖）
+jitsi-receive --host meet.example.com --room my-room \
+  --out recordings --ndi --ndi-prefix "Jitsi"
 ```
 
 ---
@@ -178,12 +186,13 @@ jitsi-stream --host meet.example.com --room my-room --name "宣传片" \
 ## Repository Structure / 代码仓库结构
 
 ```
-cmd/           jitsi-stream (main tool), jitsi-receive (headless validation probe)
+cmd/           jitsi-stream (main tool), jitsi-receive (per-user recorder & NDI broadcaster)
 internal/
   ├── input/         Protocol resolution, proxy routing, token signing, URL redaction
   ├── rtmpserver/    Built-in authenticated RTMP ingest server (for OBS push)
   ├── media/         FFmpeg process lifecycle, loopback RTP, continuous sequence/timestamp sink
-  └── conference/    Native Jitsi XMPP/Jingle signalling, ICE/DTLS transport, presence management
+  ├── ndi/           Zero-GStreamer per-participant NDI broadcaster & SDP/FFmpeg sink manager
+  └── conference/    Native Jitsi XMPP/Jingle signalling, ICE/DTLS transport, SSRC-to-participant mapping
 third_party/   Vendored & patched signalling and RTMP modules, full third-party notices
 deploy/        Docker Compose templates (pull & ingest profiles) and systemd service files
 scripts/       Packaging script, E2E verification script, license generator

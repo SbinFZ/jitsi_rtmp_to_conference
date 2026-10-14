@@ -409,6 +409,30 @@ func (s *Session) Endpoints() []string {
 	return s.Conn.Occupants()
 }
 
+// EndpointDisplayName returns the human-readable display name (<nick>) for an endpoint ID.
+func (s *Session) EndpointDisplayName(endpoint string) string {
+	return s.Conn.OccupantDisplayName(endpoint)
+}
+
+// EndpointDisplayNames returns a snapshot of endpoint ID -> display name (<nick>).
+func (s *Session) EndpointDisplayNames() map[string]string {
+	return s.Conn.OccupantDisplayNames()
+}
+
+// ParseJingleStanza parses any Jingle IQ stanza (session-initiate, source-add, source-remove, etc.).
+func ParseJingleStanza(raw string) *jingle.Parsed {
+	return jingle.Parse(raw)
+}
+
+// ParsedJingle is an alias for jingle.Parsed.
+type ParsedJingle = jingle.Parsed
+
+// Source is an alias for jingle.Source representing an advertised RTP SSRC and its metadata.
+type Source = jingle.Source
+
+// SSRCGroup is an alias for jingle.SSRCGroup (e.g. FID primary + RTX SSRC group).
+type SSRCGroup = jingle.SSRCGroup
+
 // Rejoin leaves the MUC and rejoins immediately WITHOUT waiting for
 // session-initiate. Use WaitJingleReinitiate after Rejoin to wait for
 // Jicofo to send a new session-initiate when another participant arrives.

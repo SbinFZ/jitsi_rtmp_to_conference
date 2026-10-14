@@ -22,7 +22,8 @@
 │   │   ├── ffmpeg.go        #   单个 FFmpeg 进程的生命周期（VP8 + Opus 转码）
 │   │   ├── sink.go          #   跨重启保持 RTP 序列号/时间戳连续
 │   │   └── reorder.go       #   接收端诊断用乱序缓冲（jitsi-receive 使用）
-│   └── conference/          # Jitsi 入会：XMPP/Jingle 协商、ICE/DTLS、桥接通道、presence
+│   ├── ndi/                 # 零 GStreamer/CGO 的每参会者 NDI 广播与 SDP/FFmpeg 转发模块
+│   └── conference/          # Jitsi 入会：XMPP/Jingle 协商、ICE/DTLS、桥接通道、presence、SSRC→参会者映射
 ├── third_party/
 │   ├── jitsi/               # Jitsi 信令客户端（固定版本 fork，修改见 UPSTREAM.md）
 │   ├── go-rtmp/             # RTMP 协议库（固定版本 fork，修 32 位编译，见 UPSTREAM.md）

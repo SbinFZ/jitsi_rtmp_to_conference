@@ -15,5 +15,6 @@ Local changes:
 - Mark presence `botType=poltergeist` and reject non-focus (P2P) Jingle so a peer offer cannot replace or terminate the JVB session.
 - `Config.RequireExistingRoom` / `Conn.RoomOccupants`: check the room exists via disco#info BEFORE focus allocation (which creates rooms); handles Prosody `muc_hide_all` (`forbidden` = exists, `item-not-found` = absent).
 - Remove unsupported JSON-source and TCC capability advertisements (XML source signalling, Pion NACK, periodic keyframes used instead).
+- Parse `<ssrc-info owner="..."/>`, `<source name="..." videoType="..."/>`, `<ssrc-group semantics="FID">`, and MUC `<nick xmlns="http://jabber.org/protocol/nick">` so receivers can map incoming SSRCs to participant endpoints and display names.
 
 Compatibility and security regression tests added under internal/xmpp and internal/jingle. The protocol is tested against stable-10314; upstream updates must be revalidated.
