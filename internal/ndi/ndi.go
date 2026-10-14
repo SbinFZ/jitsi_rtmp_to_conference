@@ -19,6 +19,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 	"sync"
 
@@ -335,7 +336,11 @@ func (b *Broadcaster) restartProcessLocked(ctx context.Context, ps *participantS
 
 	var cmd *exec.Cmd
 	if b.cfg.SinkCmd != "" {
-		cmd = exec.CommandContext(pCtx, "sh", "-c", b.cfg.SinkCmd)
+		if runtime.GOOS == "windows" {
+			cmd = exec.CommandContext(pCtx, "cmd", "/C", b.cfg.SinkCmd)
+		} else {
+			cmd = exec.CommandContext(pCtx, "sh", "-c", b.cfg.SinkCmd)
+		}
 		cmd.Env = append(os.Environ(),
 			"JITSI_NDI_NAME="+ps.sourceName,
 			"JITSI_ENDPOINT="+ps.id.Endpoint,
