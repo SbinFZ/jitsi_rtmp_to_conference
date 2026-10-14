@@ -2,7 +2,6 @@ package ndi
 
 import (
 	"context"
-	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -58,27 +57,13 @@ func TestBuildSDPAndFFmpegArgs(t *testing.T) {
 }
 
 func TestBroadcasterWithSinkCommand(t *testing.T) {
-	if os.Getenv("GO_WANT_NDI_SINK_HELPER") == "1" {
-		marker := os.Getenv("TEST_NDI_MARKER")
-		if marker != "" {
-			payload := fmt.Sprintf("%s|%s", os.Getenv("JITSI_NDI_NAME"), os.Getenv("JITSI_ENDPOINT"))
-			_ = os.WriteFile(marker, []byte(payload), 0644)
-		}
-		return
-	}
-
 	tmp := t.TempDir()
 	marker := filepath.Join(tmp, "env.txt")
-	exe, err := os.Executable()
-	if err != nil {
-		t.Fatalf("os.Executable failed: %v", err)
-	}
-	t.Setenv("GO_WANT_NDI_SINK_HELPER", "1")
 	t.Setenv("TEST_NDI_MARKER", marker)
 
-	sinkCmd := fmt.Sprintf("%q -test.run=^TestBroadcasterWithSinkCommand$", exe)
+	sinkCmd := `printf '%s|%s' "$JITSI_NDI_NAME" "$JITSI_ENDPOINT" > "$TEST_NDI_MARKER"`
 	if runtime.GOOS == "windows" {
-		sinkCmd = fmt.Sprintf("\"%s\" -test.run=^TestBroadcasterWithSinkCommand$", exe)
+		sinkCmd = `echo %JITSI_NDI_NAME%^|%JITSI_ENDPOINT%> "%TEST_NDI_MARKER%"`
 	}
 
 	b := NewBroadcaster(Config{
@@ -123,8 +108,9 @@ func TestBroadcasterWithSinkCommand(t *testing.T) {
 	for time.Now().Before(deadline) {
 		data, err := os.ReadFile(marker)
 		if err == nil && len(data) > 0 {
-			if string(data) != "Jitsi (testroom) - Charlie [ep01]|ep01" {
-				t.Fatalf("unexpected sink env marker: %q", string(data))
+			got := strings.TrimSpace(string(data))
+			if got != "Jitsi (testroom) - Charlie [ep01]|ep01" {
+				t.Fatalf("unexpected sink env marker: %q", got)
 			}
 			return
 		}
