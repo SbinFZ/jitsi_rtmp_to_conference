@@ -344,6 +344,9 @@ func (b *Broadcaster) restartProcessLocked(ctx context.Context, ps *participantS
 		} else {
 			cmd = exec.CommandContext(pCtx, "sh", "-c", b.cfg.SinkCmd)
 		}
+		if b.cfg.OutDir != "" {
+			cmd.Dir = b.cfg.OutDir
+		}
 		cmd.Env = append(os.Environ(),
 			"JITSI_NDI_NAME="+ps.sourceName,
 			"JITSI_ENDPOINT="+ps.id.Endpoint,
