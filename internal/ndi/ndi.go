@@ -13,6 +13,7 @@ package ndi
 import (
 	"context"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"os"
@@ -22,6 +23,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/pion/rtp"
 )
@@ -117,10 +119,9 @@ func BuildFFmpegArgs(sdpPath, format, target string) []string {
 		format = string(ModeNDI)
 	}
 	args := []string{
+		"-y",
 		"-hide_banner", "-loglevel", "warning",
 		"-protocol_whitelist", "file,udp,rtp",
-		"-fflags", "+genpts+nobuffer",
-		"-flags", "low_delay",
 		"-i", sdpPath,
 	}
 	switch format {
@@ -134,12 +135,15 @@ func BuildFFmpegArgs(sdpPath, format, target string) []string {
 		args = append(args,
 			"-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency",
 			"-c:a", "aac", "-ar", "48000", "-ac", "2",
+			"-flush_packets", "1",
 			"-f", "mpegts", target,
 		)
 	case "webm":
 		args = append(args,
 			"-c:v", "copy",
 			"-c:a", "copy",
+			"-live", "1",
+			"-flush_packets", "1",
 			"-f", "webm", target,
 		)
 	default:
@@ -170,6 +174,7 @@ type participantStream struct {
 	hasAudio bool
 	hasVideo bool
 
+	stdin  io.WriteCloser
 	cancel context.CancelFunc
 	done   chan struct{}
 }
@@ -266,27 +271,43 @@ func (b *Broadcaster) WriteRTP(ctx context.Context, id ParticipantIdentity, fall
 	return err
 }
 
-func allocLoopbackSender() (*net.UDPConn, int, error) {
-	probe, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0})
-	if err != nil {
-		return nil, 0, err
+func allocRTPPortPair(excludePort int) (int, error) {
+	for i := 0; i < 64; i++ {
+		c1, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0})
+		if err != nil {
+			return 0, err
+		}
+		port := c1.LocalAddr().(*net.UDPAddr).Port
+		if port%2 != 0 {
+			_ = c1.Close()
+			port++
+			c1, err = net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: port})
+			if err != nil {
+				continue
+			}
+		}
+		if excludePort > 0 && (port == excludePort || port == excludePort+1 || port+1 == excludePort) {
+			_ = c1.Close()
+			continue
+		}
+		c2, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: port + 1})
+		if err != nil {
+			_ = c1.Close()
+			continue
+		}
+		_ = c2.Close()
+		_ = c1.Close()
+		return port, nil
 	}
-	port := probe.LocalAddr().(*net.UDPAddr).Port
-	_ = probe.Close()
-
-	conn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0})
-	if err != nil {
-		return nil, 0, err
-	}
-	return conn, port, nil
+	return 0, fmt.Errorf("unable to allocate even RTP/RTCP loopback port pair")
 }
 
 func (b *Broadcaster) createStreamLocked(key string, id ParticipantIdentity) (*participantStream, error) {
-	aConn, aPort, err := allocLoopbackSender()
+	aConn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0})
 	if err != nil {
 		return nil, err
 	}
-	vConn, vPort, err := allocLoopbackSender()
+	vConn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0})
 	if err != nil {
 		_ = aConn.Close()
 		return nil, err
@@ -303,25 +324,47 @@ func (b *Broadcaster) createStreamLocked(key string, id ParticipantIdentity) (*p
 		sdpPath:    sdpPath,
 		audioConn:  aConn,
 		videoConn:  vConn,
-		audioPort:  aPort,
-		videoPort:  vPort,
 	}, nil
 }
 
-func (b *Broadcaster) restartProcessLocked(ctx context.Context, ps *participantStream) {
-	if ps.cancel != nil {
-		ps.cancel()
-		if ps.done != nil {
+func stopProcess(ps *participantStream) {
+	if ps.stdin != nil {
+		_, _ = ps.stdin.Write([]byte("q\n"))
+		_ = ps.stdin.Close()
+		ps.stdin = nil
+	}
+	if ps.done != nil {
+		select {
+		case <-ps.done:
+		case <-time.After(150 * time.Millisecond):
+			if ps.cancel != nil {
+				ps.cancel()
+			}
 			<-ps.done
 		}
+		ps.done = nil
 	}
+	if ps.cancel != nil {
+		ps.cancel()
+		ps.cancel = nil
+	}
+}
+
+func (b *Broadcaster) restartProcessLocked(ctx context.Context, ps *participantStream) {
+	stopProcess(ps)
 	aPort := 0
 	if ps.hasAudio {
-		aPort = ps.audioPort
+		if p, err := allocRTPPortPair(0); err == nil {
+			ps.audioPort = p
+			aPort = p
+		}
 	}
 	vPort := 0
 	if ps.hasVideo {
-		vPort = ps.videoPort
+		if p, err := allocRTPPortPair(aPort); err == nil {
+			ps.videoPort = p
+			vPort = p
+		}
 	}
 	if aPort == 0 && vPort == 0 {
 		return
@@ -338,6 +381,7 @@ func (b *Broadcaster) restartProcessLocked(ctx context.Context, ps *participantS
 	ps.done = done
 
 	var cmd *exec.Cmd
+	var stdin io.WriteCloser
 	if b.cfg.SinkCmd != "" {
 		if runtime.GOOS == "windows" {
 			cmd = exec.CommandContext(pCtx, "cmd", "/C", b.cfg.SinkCmd)
@@ -364,7 +408,9 @@ func (b *Broadcaster) restartProcessLocked(ctx context.Context, ps *participantS
 		}
 		args := BuildFFmpegArgs(ps.sdpPath, b.cfg.Format, target)
 		cmd = exec.CommandContext(pCtx, b.cfg.FFmpegBin, args...)
+		stdin, _ = cmd.StdinPipe()
 	}
+	ps.stdin = stdin
 
 	slog.Info("starting participant NDI/broadcast stream",
 		"source_name", ps.sourceName,
@@ -408,12 +454,7 @@ func (b *Broadcaster) Close() error {
 	b.mu.Unlock()
 
 	for _, ps := range streams {
-		if ps.cancel != nil {
-			ps.cancel()
-		}
-		if ps.done != nil {
-			<-ps.done
-		}
+		stopProcess(ps)
 		if ps.audioConn != nil {
 			_ = ps.audioConn.Close()
 		}
