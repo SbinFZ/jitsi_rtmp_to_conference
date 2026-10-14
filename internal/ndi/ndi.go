@@ -240,17 +240,20 @@ func (b *Broadcaster) WriteRTP(ctx context.Context, id ParticipantIdentity, fall
 		b.restartProcessLocked(ctx, ps)
 	}
 	var conn *net.UDPConn
+	var dstPort int
 	var pt uint8
 	if isVideo {
 		conn = ps.videoConn
+		dstPort = ps.videoPort
 		pt = 96
 	} else {
 		conn = ps.audioConn
+		dstPort = ps.audioPort
 		pt = 111
 	}
 	b.mu.Unlock()
 
-	if conn == nil {
+	if conn == nil || dstPort <= 0 {
 		return nil
 	}
 	clone := *pkt
@@ -259,7 +262,7 @@ func (b *Broadcaster) WriteRTP(ctx context.Context, id ParticipantIdentity, fall
 	if err != nil {
 		return err
 	}
-	_, err = conn.Write(raw)
+	_, err = conn.WriteToUDP(raw, &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: dstPort})
 	return err
 }
 
@@ -271,7 +274,7 @@ func allocLoopbackSender() (*net.UDPConn, int, error) {
 	port := probe.LocalAddr().(*net.UDPAddr).Port
 	_ = probe.Close()
 
-	conn, err := net.DialUDP("udp4", nil, &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: port})
+	conn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0})
 	if err != nil {
 		return nil, 0, err
 	}
