@@ -11,6 +11,7 @@
 package ndi
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -173,6 +174,21 @@ type participantStream struct {
 
 	hasAudio bool
 	hasVideo bool
+	started  bool
+
+	startTime      time.Time
+	audioSeq       uint16
+	videoSeq       uint16
+	audioBaseInit  bool
+	audioBaseRTPTS uint32
+	audioStartOff  uint32
+	videoBaseInit  bool
+	videoBaseRTPTS uint32
+	videoStartOff  uint32
+
+	curKeyframeTS   uint32
+	curKeyframePkts [][]byte
+	lastKeyframe    [][]byte
 
 	stdin  io.WriteCloser
 	cancel context.CancelFunc
@@ -207,6 +223,126 @@ func streamKey(id ParticipantIdentity, fallbackSSRC uint32) string {
 	return ep
 }
 
+// RegisterMedia pre-declares whether a participant endpoint has audio and/or video
+// tracks announced in signalling, so the first RTP packet starts FFmpeg with both
+// SDP m= sections without requiring a process restart.
+func (b *Broadcaster) RegisterMedia(id ParticipantIdentity, hasAudio, hasVideo bool) {
+	if !b.cfg.Enabled {
+		return
+	}
+	ep := strings.TrimSpace(id.Endpoint)
+	if ep == "" || ep == "jvb" {
+		return
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.closed {
+		return
+	}
+	key := streamKey(id, 0)
+	ps, ok := b.streams[key]
+	if !ok {
+		var err error
+		ps, err = b.createStreamLocked(key, id)
+		if err != nil {
+			return
+		}
+		b.streams[key] = ps
+	}
+	if id.DisplayName != "" {
+		ps.id.DisplayName = id.DisplayName
+		ps.sourceName = SourceName(b.cfg.Prefix, b.cfg.Room, ps.id)
+	}
+	if hasAudio {
+		ps.hasAudio = true
+	}
+	if hasVideo {
+		ps.hasVideo = true
+	}
+}
+
+// stripVP8DescriptorToRFC7741Minimal rewrites a VP8 RTP payload descriptor to a minimal
+// 1-byte RFC 7741 descriptor (preserving the S bit and PartID), removing extended X/I/L/T/K
+// headers that some FFmpeg RTP VP8 depacketizer builds fail to parse when PictureID or TL0PICIDX is present.
+func stripVP8DescriptorToRFC7741Minimal(payload []byte) []byte {
+	if len(payload) < 2 {
+		return payload
+	}
+	b0 := payload[0]
+	x := (b0 & 0x80) != 0
+	if !x {
+		return payload
+	}
+	idx := 1
+	ext := payload[idx]
+	idx++
+	if (ext & 0x80) != 0 { // I bit (PictureID)
+		if len(payload) <= idx {
+			return payload
+		}
+		if (payload[idx] & 0x80) != 0 {
+			idx += 2
+		} else {
+			idx++
+		}
+	}
+	if (ext & 0x40) != 0 { // L bit (TL0PICIDX)
+		idx++
+	}
+	if (ext&0x20) != 0 || (ext&0x10) != 0 { // T or K bit
+		idx++
+	}
+	if idx > len(payload) {
+		return payload
+	}
+	out := make([]byte, 1+(len(payload)-idx))
+	out[0] = b0 & 0x7f // Clear X bit, keep N/S/PartID
+	copy(out[1:], payload[idx:])
+	return out
+}
+
+// isVP8KeyframeStart checks whether a raw VP8 RTP payload is the first packet of a VP8 keyframe.
+func isVP8KeyframeStart(payload []byte) bool {
+	if len(payload) < 4 {
+		return false
+	}
+	idx := 0
+	x := (payload[0] & 0x80) != 0
+	s := (payload[0] & 0x10) != 0
+	partID := payload[0] & 0x0f
+	if !s || partID != 0 {
+		return false
+	}
+	idx++
+	if x {
+		if len(payload) <= idx {
+			return false
+		}
+		ext := payload[idx]
+		idx++
+		if (ext & 0x80) != 0 { // I bit (PictureID)
+			if len(payload) <= idx {
+				return false
+			}
+			if (payload[idx] & 0x80) != 0 {
+				idx += 2
+			} else {
+				idx++
+			}
+		}
+		if (ext & 0x40) != 0 { // L bit (TL0PICIDX)
+			idx++
+		}
+		if (ext&0x20) != 0 || (ext&0x10) != 0 { // T or K bit
+			idx++
+		}
+	}
+	if len(payload) < idx+10 {
+		return false
+	}
+	return (payload[idx]&0x01) == 0 && payload[idx+3] == 0x9d && payload[idx+4] == 0x01 && payload[idx+5] == 0x2a
+}
+
 // WriteRTP forwards an RTP packet (audio or video) to the participant's NDI/broadcast pipeline.
 // Payload types are normalized to 111 (Opus) and 96 (VP8) to match the generated SDP.
 func (b *Broadcaster) WriteRTP(ctx context.Context, id ParticipantIdentity, fallbackSSRC uint32, isVideo bool, pkt *rtp.Packet) error {
@@ -229,11 +365,11 @@ func (b *Broadcaster) WriteRTP(ctx context.Context, id ParticipantIdentity, fall
 		}
 		b.streams[key] = ps
 	}
-	needRestart := false
 	if id.DisplayName != "" && ps.id.DisplayName != id.DisplayName {
 		ps.id.DisplayName = id.DisplayName
 		ps.sourceName = SourceName(b.cfg.Prefix, b.cfg.Room, ps.id)
 	}
+	needRestart := ps.done == nil
 	if isVideo && !ps.hasVideo {
 		ps.hasVideo = true
 		needRestart = true
@@ -241,31 +377,99 @@ func (b *Broadcaster) WriteRTP(ctx context.Context, id ParticipantIdentity, fall
 		ps.hasAudio = true
 		needRestart = true
 	}
+
+	if isVideo {
+		if isVP8KeyframeStart(pkt.Payload) {
+			ps.curKeyframeTS = pkt.Timestamp
+			ps.curKeyframePkts = nil
+		}
+		if ps.curKeyframeTS != 0 && pkt.Timestamp == ps.curKeyframeTS {
+			cp := make([]byte, len(pkt.Payload))
+			copy(cp, pkt.Payload)
+			ps.curKeyframePkts = append(ps.curKeyframePkts, cp)
+			if pkt.Marker {
+				ps.lastKeyframe = ps.curKeyframePkts
+				ps.curKeyframePkts = nil
+				ps.curKeyframeTS = 0
+			}
+		}
+	}
+
+	// If this participant is known to have video, wait until the first video packet
+	// (which is guaranteed to be a keyframe by jitsi-receive) before starting FFmpeg,
+	// so FFmpeg immediately probes VP8 dimensions without discarding audio packets.
+	if ps.hasVideo && !ps.started {
+		if !isVideo {
+			b.mu.Unlock()
+			return nil
+		}
+		ps.started = true
+		needRestart = true
+	} else if !ps.hasVideo && !ps.started {
+		ps.started = true
+		needRestart = true
+	}
+
+	if ps.startTime.IsZero() {
+		ps.startTime = time.Now()
+	}
+
+	var pt uint8
+	var seq uint16
+	var normTS uint32
+	if isVideo {
+		pt = 96
+		ps.videoSeq++
+		seq = ps.videoSeq
+		if !ps.videoBaseInit {
+			ps.videoBaseInit = true
+			ps.videoBaseRTPTS = pkt.Timestamp
+			ps.videoStartOff = uint32(time.Since(ps.startTime).Seconds()*90000) + 900
+		}
+		normTS = ps.videoStartOff + (pkt.Timestamp - ps.videoBaseRTPTS)
+	} else {
+		pt = 111
+		ps.audioSeq++
+		seq = ps.audioSeq
+		if !ps.audioBaseInit {
+			ps.audioBaseInit = true
+			ps.audioBaseRTPTS = pkt.Timestamp
+			ps.audioStartOff = uint32(time.Since(ps.startTime).Seconds()*48000) + 480
+		}
+		normTS = ps.audioStartOff + (pkt.Timestamp - ps.audioBaseRTPTS)
+	}
+
+	clone := *pkt
+	clone.Header.PayloadType = pt
+	clone.Header.SequenceNumber = seq
+	clone.Header.Timestamp = normTS
+	clone.Header.Extension = false
+	clone.Header.ExtensionProfile = 0
+	clone.Header.Extensions = nil
+	if isVideo {
+		clone.Payload = stripVP8DescriptorToRFC7741Minimal(pkt.Payload)
+	}
+	raw, err := clone.Marshal()
+	if err != nil {
+		b.mu.Unlock()
+		return err
+	}
 	if needRestart {
 		b.restartProcessLocked(ctx, ps)
 	}
 	var conn *net.UDPConn
 	var dstPort int
-	var pt uint8
 	if isVideo {
 		conn = ps.videoConn
 		dstPort = ps.videoPort
-		pt = 96
 	} else {
 		conn = ps.audioConn
 		dstPort = ps.audioPort
-		pt = 111
 	}
 	b.mu.Unlock()
 
 	if conn == nil || dstPort <= 0 {
 		return nil
-	}
-	clone := *pkt
-	clone.Header.PayloadType = pt
-	raw, err := clone.Marshal()
-	if err != nil {
-		return err
 	}
 	_, err = conn.WriteToUDP(raw, &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: dstPort})
 	return err
@@ -336,7 +540,7 @@ func stopProcess(ps *participantStream) {
 	if ps.done != nil {
 		select {
 		case <-ps.done:
-		case <-time.After(150 * time.Millisecond):
+		case <-time.After(1500 * time.Millisecond):
 			if ps.cancel != nil {
 				ps.cancel()
 			}
@@ -375,13 +579,14 @@ func (b *Broadcaster) restartProcessLocked(ctx context.Context, ps *participantS
 		return
 	}
 
-	pCtx, cancel := context.WithCancel(ctx)
+	pCtx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	ps.cancel = cancel
 	ps.done = done
 
 	var cmd *exec.Cmd
 	var stdin io.WriteCloser
+	var stderrBuf bytes.Buffer
 	if b.cfg.SinkCmd != "" {
 		if runtime.GOOS == "windows" {
 			cmd = exec.CommandContext(pCtx, "cmd", "/C", b.cfg.SinkCmd)
@@ -410,6 +615,7 @@ func (b *Broadcaster) restartProcessLocked(ctx context.Context, ps *participantS
 		cmd = exec.CommandContext(pCtx, b.cfg.FFmpegBin, args...)
 		stdin, _ = cmd.StdinPipe()
 	}
+	cmd.Stderr = &stderrBuf
 	ps.stdin = stdin
 
 	slog.Info("starting participant NDI/broadcast stream",
@@ -422,10 +628,20 @@ func (b *Broadcaster) restartProcessLocked(ctx context.Context, ps *participantS
 
 	go func() {
 		defer close(done)
-		if err := cmd.Run(); err != nil && pCtx.Err() == nil {
-			slog.Warn("participant broadcast process exited", "source_name", ps.sourceName, "error", err)
+		if err := cmd.Start(); err != nil {
+			if pCtx.Err() == nil {
+				slog.Warn("participant broadcast process failed to start", "source_name", ps.sourceName, "error", err)
+			}
+			return
+		}
+		if err := cmd.Wait(); err != nil && pCtx.Err() == nil {
+			slog.Warn("participant broadcast process exited", "source_name", ps.sourceName, "error", err, "stderr", strings.TrimSpace(stderrBuf.String()))
+		} else if s := strings.TrimSpace(stderrBuf.String()); s != "" {
+			slog.Info("participant broadcast stderr", "source_name", ps.sourceName, "stderr", s)
 		}
 	}()
+	// Give FFmpeg a moment to open its local SDP RTP UDP sockets before the caller sends the first keyframe packet.
+	time.Sleep(100 * time.Millisecond)
 }
 
 // ActiveSources returns the list of currently active NDI source names.

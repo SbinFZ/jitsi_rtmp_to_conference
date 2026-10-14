@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"sort"
@@ -47,6 +48,7 @@ type TrackRecord struct {
 	NDISource   string `json:"ndi_source,omitempty"`
 	RawFile     string `json:"raw_file"`
 	UserFile    string `json:"user_file,omitempty"`
+	MuxedFile   string `json:"muxed_file,omitempty"`
 	Packets     uint64 `json:"packets"`
 }
 
@@ -103,22 +105,32 @@ func run() error {
 	closing := false
 
 	var connPtr atomic.Pointer[conference.Connection]
+	var sourcesMu sync.RWMutex
+	sources := make(map[uint32]conference.TrackSourceInfo)
 	var tracksMu sync.Mutex
 	trackRecords := make(map[uint32]*TrackRecord)
 
 	lookupIdentity := func(ssrc uint32) (ndi.ParticipantIdentity, bool) {
-		c := connPtr.Load()
-		if c == nil || c.Participants == nil {
-			return ndi.ParticipantIdentity{}, false
-		}
-		info, ok := c.Participants.Lookup(ssrc)
-		if !ok {
-			return ndi.ParticipantIdentity{}, false
-		}
-		if info.IsRTX && info.PrimarySSRC != 0 {
-			if pInfo, pOk := c.Participants.Lookup(info.PrimarySSRC); pOk {
+		sourcesMu.RLock()
+		info, ok := sources[ssrc]
+		if ok && info.IsRTX && info.PrimarySSRC != 0 {
+			if pInfo, pOk := sources[info.PrimarySSRC]; pOk {
 				info = pInfo
 			}
+		}
+		sourcesMu.RUnlock()
+		if !ok {
+			if c := connPtr.Load(); c != nil && c.Participants != nil {
+				info, ok = c.Participants.Lookup(ssrc)
+				if ok && info.IsRTX && info.PrimarySSRC != 0 {
+					if pInfo, pOk := c.Participants.Lookup(info.PrimarySSRC); pOk {
+						info = pInfo
+					}
+				}
+			}
+		}
+		if !ok {
+			return ndi.ParticipantIdentity{}, false
 		}
 		return ndi.ParticipantIdentity{
 			Endpoint:    info.Endpoint,
@@ -154,8 +166,18 @@ func run() error {
 	}
 
 	cc.OnSourceUpdate = func(info conference.TrackSourceInfo) {
+		sourcesMu.Lock()
+		sources[info.SSRC] = info
+		sourcesMu.Unlock()
 		if info.IsRTX {
 			return
+		}
+		if ndiCfg.Enabled && info.Endpoint != "" && info.Endpoint != "jvb" {
+			broadcaster.RegisterMedia(ndi.ParticipantIdentity{
+				Endpoint:    info.Endpoint,
+				DisplayName: info.DisplayName,
+				VideoType:   info.VideoType,
+			}, info.Media == "audio", info.Media == "video")
 		}
 		slog.Info("participant stream mapped",
 			"ssrc", info.SSRC,
@@ -250,8 +272,9 @@ func run() error {
 		pliCtx, stopPLI := context.WithCancel(ctx)
 		defer stopPLI()
 		if isVideo {
+			_ = pc.WriteRTCP([]rtcp.Packet{&rtcp.PictureLossIndication{MediaSSRC: ssrc}})
 			go func() {
-				t := time.NewTicker(time.Second)
+				t := time.NewTicker(400 * time.Millisecond)
 				defer t.Stop()
 				for {
 					select {
@@ -320,6 +343,7 @@ func run() error {
 		c.Close()
 		wg.Wait()
 		_ = broadcaster.Close()
+		finalizeParticipantMux(out, ndiCfg, trackRecords, &tracksMu)
 		writeManifest()
 	}
 	if err := c.Session.RequestVideo(ctx, 1080); err != nil {
@@ -353,6 +377,99 @@ loop:
 		return fmt.Errorf("did not receive required media")
 	}
 	return nil
+}
+
+func finalizeParticipantMux(out string, ndiCfg ndi.Config, trackRecords map[uint32]*TrackRecord, tracksMu *sync.Mutex) {
+	if !ndiCfg.Enabled || (ndiCfg.Format != "webm" && ndiCfg.Format != "mpegts") {
+		return
+	}
+	ffmpegBin := ndiCfg.FFmpegBin
+	if ffmpegBin == "" {
+		ffmpegBin = "ffmpeg"
+	}
+	type epTracks struct {
+		endpoint    string
+		displayName string
+		audioPath   string
+		videoPath   string
+		ssrcs       []uint32
+	}
+	byEp := make(map[string]*epTracks)
+	tracksMu.Lock()
+	for ssrc, rec := range trackRecords {
+		if rec.Endpoint == "" || rec.Endpoint == "jvb" || rec.Packets == 0 {
+			continue
+		}
+		rawPath := filepath.Join(out, rec.RawFile)
+		info, err := os.Stat(rawPath)
+		if err != nil || info.Size() == 0 {
+			continue
+		}
+		g, ok := byEp[rec.Endpoint]
+		if !ok {
+			g = &epTracks{endpoint: rec.Endpoint, displayName: rec.DisplayName}
+			byEp[rec.Endpoint] = g
+		}
+		if g.displayName == "" && rec.DisplayName != "" {
+			g.displayName = rec.DisplayName
+		}
+		if rec.Media == "video" && info.Size() > 32 {
+			g.videoPath = rawPath
+		} else if rec.Media == "audio" && info.Size() > 64 {
+			g.audioPath = rawPath
+		}
+		g.ssrcs = append(g.ssrcs, ssrc)
+	}
+	tracksMu.Unlock()
+
+	ext := ".webm"
+	if ndiCfg.Format == "mpegts" {
+		ext = ".ts"
+	}
+	for ep, g := range byEp {
+		if g.videoPath == "" && g.audioPath == "" {
+			continue
+		}
+		muxName := fmt.Sprintf("participant-%s%s", ndi.SanitizeToken(ep), ext)
+		muxPath := filepath.Join(out, muxName)
+		var args []string
+		args = append(args, "-y", "-hide_banner", "-loglevel", "error")
+		if g.videoPath != "" {
+			args = append(args, "-i", g.videoPath)
+		}
+		if g.audioPath != "" {
+			args = append(args, "-i", g.audioPath)
+		}
+		if ndiCfg.Format == "webm" {
+			args = append(args, "-c", "copy", "-f", "webm", muxPath)
+		} else {
+			if g.videoPath != "" {
+				args = append(args, "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p")
+			}
+			if g.audioPath != "" {
+				args = append(args, "-c:a", "aac", "-ar", "48000", "-ac", "2")
+			}
+			args = append(args, "-f", "mpegts", muxPath)
+		}
+		if err := exec.Command(ffmpegBin, args...).Run(); err != nil {
+			slog.Warn("participant mux failed", "endpoint", ep, "error", err)
+			continue
+		}
+		if g.displayName != "" {
+			namedMux := fmt.Sprintf("participant-%s-%s%s", ndi.SanitizeToken(g.displayName), ndi.SanitizeToken(ep), ext)
+			namedPath := filepath.Join(out, namedMux)
+			_ = os.Remove(namedPath)
+			_ = os.Link(muxPath, namedPath)
+		}
+		tracksMu.Lock()
+		for _, ssrc := range g.ssrcs {
+			if rec, ok := trackRecords[ssrc]; ok {
+				rec.MuxedFile = muxName
+			}
+		}
+		tracksMu.Unlock()
+		slog.Info("muxed participant stream saved", "endpoint", ep, "display_name", g.displayName, "file", muxName)
+	}
 }
 
 func vp8Dimensions(payload []byte) (uint16, uint16, bool) {
