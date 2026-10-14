@@ -39,6 +39,37 @@ func JingleToSDP(j *XMLJingle) string {
 	return b.String()
 }
 
+func filterPayloads(mediaType string, payloads []XMLPayloadType) []XMLPayloadType {
+	if mediaType != "video" || len(payloads) == 0 {
+		return payloads
+	}
+	vp8IDs := make(map[string]bool)
+	for _, p := range payloads {
+		if strings.EqualFold(p.Name, "VP8") {
+			vp8IDs[p.ID] = true
+		}
+	}
+	if len(vp8IDs) == 0 {
+		return payloads
+	}
+	var kept []XMLPayloadType
+	for _, p := range payloads {
+		if vp8IDs[p.ID] {
+			kept = append(kept, p)
+			continue
+		}
+		if strings.EqualFold(p.Name, "rtx") {
+			for _, param := range p.Parameters {
+				if param.Name == "apt" && vp8IDs[param.Value] {
+					kept = append(kept, p)
+					break
+				}
+			}
+		}
+	}
+	return kept
+}
+
 func writeContent(b *strings.Builder, c XMLContent) {
 	desc := c.Description
 	transport := c.Transport
@@ -52,6 +83,11 @@ func writeContent(b *strings.Builder, c XMLContent) {
 		if c.Name == "data" || (desc != nil && desc.SCTPMap != nil) || (transport != nil && transport.SCTPMap != nil) {
 			mediaType = "application"
 		}
+	}
+
+	var activePayloads []XMLPayloadType
+	if desc != nil {
+		activePayloads = filterPayloads(mediaType, desc.Payloads)
 	}
 
 	// build m= line
@@ -76,10 +112,8 @@ func writeContent(b *strings.Builder, c XMLContent) {
 	} else {
 		// audio or video — collect payload IDs
 		var ids []string
-		if desc != nil {
-			for _, p := range desc.Payloads {
-				ids = append(ids, p.ID)
-			}
+		for _, p := range activePayloads {
+			ids = append(ids, p.ID)
 		}
 		if len(ids) == 0 {
 			ids = []string{"0"}
@@ -171,7 +205,7 @@ func writeContent(b *strings.Builder, c XMLContent) {
 
 	// payload types
 	if desc != nil {
-		for _, pt := range desc.Payloads {
+		for _, pt := range activePayloads {
 			channels := pt.Channels
 			if channels == "" {
 				channels = ""

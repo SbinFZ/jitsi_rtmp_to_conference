@@ -195,16 +195,49 @@ type participantStream struct {
 	done   chan struct{}
 }
 
+// ResolveFFmpegBin resolves the ffmpeg executable path, searching common macOS/Linux
+// installation directories (/opt/homebrew/bin, /usr/local/bin) if not in $PATH.
+func ResolveFFmpegBin(ffmpegBin string) string {
+	if ffmpegBin == "" {
+		ffmpegBin = "ffmpeg"
+	}
+	if p, err := exec.LookPath(ffmpegBin); err == nil {
+		return p
+	}
+	if ffmpegBin == "ffmpeg" {
+		for _, candidate := range []string{"/opt/homebrew/bin/ffmpeg", "/usr/local/bin/ffmpeg", "/usr/bin/ffmpeg"} {
+			if info, err := os.Stat(candidate); err == nil && !info.IsDir() {
+				return candidate
+			}
+		}
+	}
+	return ffmpegBin
+}
+
+// HasNDIMuxer reports whether the given FFmpeg executable was built with the libndi_newtek muxer.
+func HasNDIMuxer(ffmpegBin string) bool {
+	ffmpegBin = ResolveFFmpegBin(ffmpegBin)
+	out, err := exec.Command(ffmpegBin, "-hide_banner", "-formats").Output()
+	if err != nil {
+		return false
+	}
+	return bytes.Contains(out, []byte("libndi_newtek"))
+}
+
 // NewBroadcaster creates a new per-participant NDI broadcaster.
 func NewBroadcaster(cfg Config) *Broadcaster {
 	if cfg.Prefix == "" {
 		cfg.Prefix = "Jitsi"
 	}
-	if cfg.FFmpegBin == "" {
-		cfg.FFmpegBin = "ffmpeg"
-	}
+	cfg.FFmpegBin = ResolveFFmpegBin(cfg.FFmpegBin)
 	if cfg.Format == "" {
 		cfg.Format = string(ModeNDI)
+	}
+	if cfg.Enabled && cfg.SinkCmd == "" && (cfg.Format == "libndi_newtek" || cfg.Format == "ndi") {
+		if !HasNDIMuxer(cfg.FFmpegBin) {
+			slog.Info("FFmpeg does not include libndi_newtek muxer; falling back to live mpegts per-participant stream output", "ffmpeg", cfg.FFmpegBin)
+			cfg.Format = string(ModeMPEGTS)
+		}
 	}
 	return &Broadcaster{
 		cfg:     cfg,

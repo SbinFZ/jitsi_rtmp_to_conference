@@ -186,6 +186,18 @@ func run() error {
 			"media", info.Media,
 			"video_type", info.VideoType,
 		)
+		if info.Media == "video" && info.Endpoint != "" && info.Endpoint != "jvb" {
+			if c := connPtr.Load(); c != nil {
+				var srcNames []string
+				if c.Participants != nil {
+					srcNames = c.Participants.SourceNames()
+				}
+				_ = c.Session.RequestVideo(ctx, 1080, srcNames...)
+				if c.PC != nil {
+					_ = c.PC.WriteRTCP([]rtcp.Packet{&rtcp.PictureLossIndication{MediaSSRC: info.SSRC}})
+				}
+			}
+		}
 		writeManifest()
 	}
 
@@ -255,7 +267,11 @@ func run() error {
 				if finalID.DisplayName != "" {
 					label = finalID.DisplayName + "-" + finalID.Endpoint
 				}
-				userFile := fmt.Sprintf("user-%s-%s-%d%s", ndi.SanitizeToken(label), mediaKind, ssrc, ext)
+				kindLabel := mediaKind
+				if isVideo && finalID.VideoType == "desktop" {
+					kindLabel = "desktop"
+				}
+				userFile := fmt.Sprintf("user-%s-%s-%d%s", ndi.SanitizeToken(label), kindLabel, ssrc, ext)
 				userPath := filepath.Join(out, userFile)
 				_ = os.Remove(userPath)
 				if linkErr := os.Link(rawPath, userPath); linkErr == nil {
@@ -346,7 +362,11 @@ func run() error {
 		finalizeParticipantMux(out, ndiCfg, trackRecords, &tracksMu)
 		writeManifest()
 	}
-	if err := c.Session.RequestVideo(ctx, 1080); err != nil {
+	var initSrcs []string
+	if c.Participants != nil {
+		initSrcs = c.Participants.SourceNames()
+	}
+	if err := c.Session.RequestVideo(ctx, 1080, initSrcs...); err != nil {
 		cleanup()
 		return err
 	}
@@ -360,6 +380,11 @@ loop:
 		case err = <-c.Done:
 			break loop
 		case <-ticker.C:
+			var curSrcs []string
+			if c.Participants != nil {
+				curSrcs = c.Participants.SourceNames()
+			}
+			_ = c.Session.RequestVideo(ctx, 1080, curSrcs...)
 			slog.Info("media received",
 				"video_packets", video.Load(),
 				"audio_packets", audio.Load(),
@@ -380,19 +405,23 @@ loop:
 }
 
 func finalizeParticipantMux(out string, ndiCfg ndi.Config, trackRecords map[uint32]*TrackRecord, tracksMu *sync.Mutex) {
-	if !ndiCfg.Enabled || (ndiCfg.Format != "webm" && ndiCfg.Format != "mpegts") {
-		return
+	ffmpegBin := ndi.ResolveFFmpegBin(ndiCfg.FFmpegBin)
+	if _, err := exec.LookPath(ffmpegBin); err != nil {
+		if info, statErr := os.Stat(ffmpegBin); statErr != nil || info.IsDir() {
+			return
+		}
 	}
-	ffmpegBin := ndiCfg.FFmpegBin
-	if ffmpegBin == "" {
-		ffmpegBin = "ffmpeg"
+	type videoInput struct {
+		ssrc      uint32
+		path      string
+		videoType string
 	}
 	type epTracks struct {
 		endpoint    string
 		displayName string
+		audioSSRC   uint32
 		audioPath   string
-		videoPath   string
-		ssrcs       []uint32
+		videos      []videoInput
 	}
 	byEp := make(map[string]*epTracks)
 	tracksMu.Lock()
@@ -414,61 +443,158 @@ func finalizeParticipantMux(out string, ndiCfg ndi.Config, trackRecords map[uint
 			g.displayName = rec.DisplayName
 		}
 		if rec.Media == "video" && info.Size() > 32 {
-			g.videoPath = rawPath
+			g.videos = append(g.videos, videoInput{
+				ssrc:      ssrc,
+				path:      rawPath,
+				videoType: rec.VideoType,
+			})
 		} else if rec.Media == "audio" && info.Size() > 64 {
 			g.audioPath = rawPath
+			g.audioSSRC = ssrc
 		}
-		g.ssrcs = append(g.ssrcs, ssrc)
 	}
 	tracksMu.Unlock()
 
-	ext := ".webm"
-	if ndiCfg.Format == "mpegts" {
-		ext = ".ts"
+	type muxTarget struct {
+		endpoint    string
+		displayName string
+		suffix      string
+		audioPath   string
+		videoPath   string
+		ssrcs       []uint32
 	}
+	var targets []muxTarget
 	for ep, g := range byEp {
-		if g.videoPath == "" && g.audioPath == "" {
+		if len(g.videos) == 0 && g.audioPath == "" {
 			continue
 		}
-		muxName := fmt.Sprintf("participant-%s%s", ndi.SanitizeToken(ep), ext)
+		if len(g.videos) == 0 {
+			targets = append(targets, muxTarget{
+				endpoint:    ep,
+				displayName: g.displayName,
+				audioPath:   g.audioPath,
+				ssrcs:       []uint32{g.audioSSRC},
+			})
+			continue
+		}
+		sort.Slice(g.videos, func(i, j int) bool { return g.videos[i].ssrc < g.videos[j].ssrc })
+		cameraCount := 0
+		desktopCount := 0
+		for _, v := range g.videos {
+			suffix := ""
+			if v.videoType == "desktop" {
+				desktopCount++
+				if desktopCount == 1 {
+					suffix = "-desktop"
+				} else {
+					suffix = fmt.Sprintf("-desktop-%d", v.ssrc)
+				}
+			} else {
+				cameraCount++
+				if cameraCount > 1 {
+					suffix = fmt.Sprintf("-%d", v.ssrc)
+				}
+			}
+			ssrcs := []uint32{v.ssrc}
+			if g.audioSSRC != 0 && suffix == "" {
+				ssrcs = append(ssrcs, g.audioSSRC)
+			}
+			targets = append(targets, muxTarget{
+				endpoint:    ep,
+				displayName: g.displayName,
+				suffix:      suffix,
+				audioPath:   g.audioPath,
+				videoPath:   v.path,
+				ssrcs:       ssrcs,
+			})
+		}
+	}
+
+	for _, t := range targets {
+		epToken := ndi.SanitizeToken(t.endpoint + t.suffix)
+		// 1. Always produce a standard MP4 (or M4A if audio-only) playable in QuickTime / Finder.
+		mp4Ext := ".mp4"
+		if t.videoPath == "" {
+			mp4Ext = ".m4a"
+		}
+		mp4Name := fmt.Sprintf("participant-%s%s", epToken, mp4Ext)
+		mp4Path := filepath.Join(out, mp4Name)
+		var mp4Args []string
+		mp4Args = append(mp4Args, "-y", "-hide_banner", "-loglevel", "error")
+		if t.videoPath != "" {
+			mp4Args = append(mp4Args, "-i", t.videoPath)
+		}
+		if t.audioPath != "" {
+			mp4Args = append(mp4Args, "-i", t.audioPath)
+		}
+		if t.videoPath != "" {
+			mp4Args = append(mp4Args, "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p")
+		}
+		if t.audioPath != "" {
+			mp4Args = append(mp4Args, "-c:a", "aac", "-ar", "48000", "-ac", "2")
+		}
+		mp4Args = append(mp4Args, "-movflags", "+faststart", mp4Path)
+		primaryMuxName := ""
+		if err := exec.Command(ffmpegBin, mp4Args...).Run(); err == nil {
+			primaryMuxName = mp4Name
+			if t.displayName != "" {
+				namedMP4 := fmt.Sprintf("participant-%s-%s%s", ndi.SanitizeToken(t.displayName), epToken, mp4Ext)
+				namedPath := filepath.Join(out, namedMP4)
+				_ = os.Remove(namedPath)
+				_ = os.Link(mp4Path, namedPath)
+				primaryMuxName = namedMP4
+			}
+			slog.Info("muxed participant MP4 saved", "endpoint", t.endpoint, "display_name", t.displayName, "file", primaryMuxName)
+		} else {
+			slog.Warn("participant MP4 mux failed", "endpoint", t.endpoint, "error", err)
+		}
+
+		// 2. Also produce lossless WebM (VP8 + Opus) or MPEG-TS when requested.
+		ext := ".webm"
+		if ndiCfg.Format == "mpegts" {
+			ext = ".ts"
+		}
+		muxName := fmt.Sprintf("participant-%s%s", epToken, ext)
 		muxPath := filepath.Join(out, muxName)
 		var args []string
 		args = append(args, "-y", "-hide_banner", "-loglevel", "error")
-		if g.videoPath != "" {
-			args = append(args, "-i", g.videoPath)
+		if t.videoPath != "" {
+			args = append(args, "-i", t.videoPath)
 		}
-		if g.audioPath != "" {
-			args = append(args, "-i", g.audioPath)
+		if t.audioPath != "" {
+			args = append(args, "-i", t.audioPath)
 		}
-		if ndiCfg.Format == "webm" {
+		if ext == ".webm" {
 			args = append(args, "-c", "copy", "-f", "webm", muxPath)
 		} else {
-			if g.videoPath != "" {
+			if t.videoPath != "" {
 				args = append(args, "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p")
 			}
-			if g.audioPath != "" {
+			if t.audioPath != "" {
 				args = append(args, "-c:a", "aac", "-ar", "48000", "-ac", "2")
 			}
 			args = append(args, "-f", "mpegts", muxPath)
 		}
-		if err := exec.Command(ffmpegBin, args...).Run(); err != nil {
-			slog.Warn("participant mux failed", "endpoint", ep, "error", err)
-			continue
-		}
-		if g.displayName != "" {
-			namedMux := fmt.Sprintf("participant-%s-%s%s", ndi.SanitizeToken(g.displayName), ndi.SanitizeToken(ep), ext)
-			namedPath := filepath.Join(out, namedMux)
-			_ = os.Remove(namedPath)
-			_ = os.Link(muxPath, namedPath)
-		}
-		tracksMu.Lock()
-		for _, ssrc := range g.ssrcs {
-			if rec, ok := trackRecords[ssrc]; ok {
-				rec.MuxedFile = muxName
+		if err := exec.Command(ffmpegBin, args...).Run(); err == nil {
+			if t.displayName != "" {
+				namedMux := fmt.Sprintf("participant-%s-%s%s", ndi.SanitizeToken(t.displayName), epToken, ext)
+				namedPath := filepath.Join(out, namedMux)
+				_ = os.Remove(namedPath)
+				_ = os.Link(muxPath, namedPath)
+			}
+			if primaryMuxName == "" || ndiCfg.Format == "webm" || ndiCfg.Format == "mpegts" {
+				primaryMuxName = muxName
 			}
 		}
-		tracksMu.Unlock()
-		slog.Info("muxed participant stream saved", "endpoint", ep, "display_name", g.displayName, "file", muxName)
+		if primaryMuxName != "" {
+			tracksMu.Lock()
+			for _, ssrc := range t.ssrcs {
+				if rec, ok := trackRecords[ssrc]; ok {
+					rec.MuxedFile = primaryMuxName
+				}
+			}
+			tracksMu.Unlock()
+		}
 	}
 }
 

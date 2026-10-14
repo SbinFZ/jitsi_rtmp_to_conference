@@ -155,16 +155,45 @@ type BridgeMessage = colibri.Message
 
 // RequestVideo sends ReceiverVideoConstraints to the bridge, telling JVB to forward
 // video streams to this endpoint. Without this call, JVB will NOT send any video.
-// maxHeight is the max resolution (e.g. 720, 360, 180). Use -1 for lastN to receive all.
-func (s *Session) RequestVideo(ctx context.Context, maxHeight int) error {
+// maxHeight is the max resolution (e.g. 1080, 720, 360). Use -1 for lastN to receive all.
+// Optional sourceNames (e.g. "422ab3db-v0", "422ab3db-v1") add per-source constraints
+// so multi-stream JVB forwards both camera and desktop screen-sharing streams simultaneously.
+func (s *Session) RequestVideo(ctx context.Context, maxHeight int, sourceNames ...string) error {
 	if err := s.OpenBridge(ctx); err != nil {
 		return err
 	}
-	return s.bridge.SendJSON(map[string]any{
+	eps := s.Endpoints()
+	constraints := make(map[string]any, len(eps)+len(sourceNames))
+	for _, ep := range eps {
+		if ep != "" && ep != "jvb" && ep != "focus" {
+			constraints[ep] = map[string]any{"maxHeight": maxHeight}
+		}
+	}
+	var validSources []string
+	for _, sn := range sourceNames {
+		sn = strings.TrimSpace(sn)
+		if sn != "" {
+			constraints[sn] = map[string]any{"maxHeight": maxHeight}
+			validSources = append(validSources, sn)
+		}
+	}
+	msg := map[string]any{
 		"colibriClass":       "ReceiverVideoConstraints",
 		"lastN":              -1,
 		"defaultConstraints": map[string]any{"maxHeight": maxHeight},
-	})
+	}
+	if len(validSources) > 0 {
+		msg["onStageSources"] = validSources
+		msg["selectedSources"] = validSources
+	}
+	if len(eps) > 0 {
+		msg["onStageEndpoints"] = eps
+		msg["selectedEndpoints"] = eps
+	}
+	if len(constraints) > 0 {
+		msg["constraints"] = constraints
+	}
+	return s.bridge.SendJSON(msg)
 }
 
 // OpenBridge connects to the Jitsi bridge channel (colibri-ws) using the URL from the

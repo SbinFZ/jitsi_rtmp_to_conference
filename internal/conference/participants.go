@@ -167,6 +167,28 @@ func (r *ParticipantRegistry) Lookup(ssrc uint32) (TrackSourceInfo, bool) {
 	return info, ok
 }
 
+// SourceNames returns all known non-RTX video source names (e.g. "422ab3db-v0", "422ab3db-v1")
+// advertised by remote participants so JVB multi-stream ReceiverVideoConstraints can request
+// both camera and desktop (screen share) tracks simultaneously.
+func (r *ParticipantRegistry) SourceNames() []string {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	seen := make(map[string]struct{})
+	var out []string
+	for _, v := range r.sources {
+		if v.IsRTX || v.Media != "video" || v.Endpoint == "" || v.Endpoint == "jvb" || v.Endpoint == "focus" {
+			continue
+		}
+		if v.SourceName != "" {
+			if _, exists := seen[v.SourceName]; !exists {
+				seen[v.SourceName] = struct{}{}
+				out = append(out, v.SourceName)
+			}
+		}
+	}
+	return out
+}
+
 // Snapshot returns a copy of all known SSRC mappings.
 func (r *ParticipantRegistry) Snapshot() map[uint32]TrackSourceInfo {
 	r.mu.RLock()

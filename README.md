@@ -82,6 +82,7 @@ jitsi-stream --host meet.example.com --room team-sync \
   --height 1080 --fps 30 --bitrate 3000
 
 # Record & broadcast all remote participants' streams via NDI (zero GStreamer dependency)
+# Supports simultaneous Camera + Screen Share (desktop) streams per participant
 jitsi-receive --host meet.example.com --room team-sync \
   --out recordings --ndi --ndi-prefix "Jitsi"
 ```
@@ -140,7 +141,7 @@ jitsi-stream --host meet.example.com --room my-room --name "监控流" \
 jitsi-stream --host meet.example.com --room my-room --name "宣传片" \
   --input "/data/videos/promo.mp4"
 
-# 4. 按参会者录制所有人的音视频流并通过 NDI 广播（零 GStreamer 依赖）
+# 4. 按参会者录制所有人的音视频流并通过 NDI 广播（零 GStreamer 依赖，支持同一用户摄像头+屏幕共享双流独立录制）
 jitsi-receive --host meet.example.com --room my-room \
   --out recordings --ndi --ndi-prefix "Jitsi"
 ```

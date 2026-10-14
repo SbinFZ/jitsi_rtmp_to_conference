@@ -912,7 +912,7 @@ func (c *Conn) AllocateFocus(ctx context.Context, room string) error {
 
 func (c *Conn) JoinMUC(ctx context.Context, room, displayName string) error {
 	roomJID := fmt.Sprintf("%s@%s/%s", room, c.mucDomain, c.nick)
-	presence := fmt.Sprintf(`<presence to="%s" xmlns="jabber:client"><x xmlns="http://jabber.org/protocol/muc"/><botType xmlns="http://jitsi.org/jitmeet">poltergeist</botType><stats-id>%s</stats-id><c hash="sha-1" node="%s" ver="%s" xmlns="http://jabber.org/protocol/caps"/><SourceInfo>{"%s-a0":{"muted":true},"%s-v0":{"muted":true}}</SourceInfo><jitsi_participant_codecList>vp8,h264,av1,vp9</jitsi_participant_codecList><nick xmlns="http://jabber.org/protocol/nick">%s</nick></presence>`,
+	presence := fmt.Sprintf(`<presence to="%s" xmlns="jabber:client"><x xmlns="http://jabber.org/protocol/muc"/><stats-id>%s</stats-id><c hash="sha-1" node="%s" ver="%s" xmlns="http://jabber.org/protocol/caps"/><SourceInfo>{"%s-a0":{"muted":true},"%s-v0":{"muted":true}}</SourceInfo><jitsi_participant_codecList>vp8</jitsi_participant_codecList><nick xmlns="http://jabber.org/protocol/nick">%s</nick></presence>`,
 		xmlEscape(roomJID), c.nick+"-stream", jitsiCapsNode, jitsiCapsVersion, c.nick, c.nick, xmlEscape(displayName))
 	if err := c.send(presence); err != nil {
 		return err

@@ -92,6 +92,12 @@ func TestParticipantRegistrySessionInitiateAndNickUpdate(t *testing.T) {
 		t.Fatalf("expected updated display name 'Bob Screen', got %q", deskInfo.DisplayName)
 	}
 
+	// Verify SourceNames includes both Alice's camera (422ab3db-v0) and Bob's desktop (99887766-v1), excluding RTX.
+	srcNames := reg.SourceNames()
+	if len(srcNames) != 2 {
+		t.Fatalf("expected 2 non-RTX video source names, got %v", srcNames)
+	}
+
 	// Test source-remove.
 	sourceRemove := `<iq type='set' from='room@conference.example.com/focus' id='j3'>
   <jingle xmlns='urn:xmpp:jingle:1' action='source-remove' sid='sid1'>
