@@ -14,6 +14,10 @@
   <a href="LICENSE"><img src="https://img.shields.io/github/license/SbinFZ/jitsi_rtmp_to_conference" alt="License: MIT"></a>
 </p>
 
+<p align="center">
+  📖 <b>Featured in the official <a href="https://jitsi.github.io/handbook/docs/community/third-party-software/">Jitsi Handbook (Third-Party Software)</a></b>
+</p>
+
 ---
 
 <a name="english"></a>
