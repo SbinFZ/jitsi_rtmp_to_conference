@@ -204,3 +204,18 @@ docs/          User manuals, architecture specs, build guides, and validation re
 
 This project is licensed under the [MIT License](LICENSE).
 Third-party dependencies and notices are detailed in [THIRD_PARTY.md](THIRD_PARTY.md) and [NOTICES.txt](third_party/NOTICES.txt).
+
+---
+
+## Feature Requests & Custom Development / 开源需求征集与定制开发承接
+
+We actively welcome **open-source feature requests** and also provide **commercial custom development & integration services** around Jitsi Meet, WebRTC, and live broadcast pipelines:
+
+- **Open-Source Feature Requests**: Have an idea or a missing workflow (e.g., JWT/Prosody authentication, H.264/VP9/AV1 codecs, SRT/WHIP/WHEP support, real-time AI transcription/translation bots, SIP/RTSP bridging, custom NDI/OBS routing)? Open a [GitHub Issue](https://github.com/SbinFZ/jitsi_rtmp_to_conference/issues) and let us know!
+- **Custom Development & Consulting**: Our engineering team takes on custom development, enterprise integration, headless Jitsi bots, media server customization, and low-latency broadcast solutions. Feel free to reach out via [GitHub Issues](https://github.com/SbinFZ/jitsi_rtmp_to_conference/issues) or discussions to discuss your project requirements.
+
+我们持续征集 **Jitsi / WebRTC 开源功能需求**，同时**承接各类音视频与 Jitsi 定制开发工作**：
+
+- **开源需求征集**：如果您在使用中有任何功能诉求（例如：JWT 鉴权与密码房间支持、WHIP/WHEP/SRT 协议接入、实时 AI 语音转写/翻译机器人、SIP/监控流双向互通、云端混流与多轨导播定制等），欢迎直接提交 [GitHub Issue](https://github.com/SbinFZ/jitsi_rtmp_to_conference/issues)！
+- **定制开发承接**：我们团队承接 Jitsi Meet 深度二次开发、无头音视频机器人（Headless Bot）、WebRTC 流媒体网关、NDI/OBS 广电级导播集成及企业私有化部署定制。如有合作或定制需求，欢迎通过 [GitHub Issues](https://github.com/SbinFZ/jitsi_rtmp_to_conference/issues) 联系我们。
+
